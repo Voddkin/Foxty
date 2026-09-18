@@ -65,6 +65,7 @@ CRITICAL: You MUST respond ONLY with valid JSON conforming to this schema:
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.config.apiKey}`,
         },
+        signal: AbortSignal.timeout(15000), // 15-second timeout to prevent hanging
         body: JSON.stringify({
           model: this.config.model,
           messages: [

@@ -263,10 +263,17 @@ export class FoxtyCore {
       }
     }
 
-    // Save any suggested memories (with confidence threshold)
-    if (brainResult.decision.memoryCandidates) {
+    // Save any suggested memories (with confidence threshold and strict privacy filtering)
+    if (brainResult.decision.memoryCandidates && channel.id !== 'ch-sakura-mail') {
       for (const candidate of brainResult.decision.memoryCandidates) {
-        if (candidate.confidence >= 0.85) {
+        if (candidate.confidence >= 0.85 && candidate.content && candidate.content.trim().length >= 3) {
+          const lower = candidate.content.toLowerCase();
+          const sensitiveKeywords = ['senha', 'password', 'token', 'secret', 'credencial', 'intimate', 'sexual', 'privad'];
+          const containsSensitive = sensitiveKeywords.some((kw) => lower.includes(kw));
+
+          // Core policy: never allow sensitive keywords to be marked safe_for_teasing
+          const safeForTeasing = containsSensitive ? false : candidate.safeForTeasing;
+
           await this.memoryStore.save({
             content: candidate.content,
             type: candidate.type,
@@ -274,7 +281,7 @@ export class FoxtyCore {
             confidence: candidate.confidence,
             source: author,
             targetUser: candidate.targetUser,
-            safeForTeasing: candidate.safeForTeasing,
+            safeForTeasing,
             retention: 'permanent',
             tags: ['deepseek-suggested'],
           });
