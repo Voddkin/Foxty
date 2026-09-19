@@ -19,7 +19,9 @@ export class Logger {
       id: Math.random().toString(36).substring(2, 9),
       timestamp: new Date().toISOString(),
       ...entry,
+      event: this.sanitize(entry.event) || entry.event,
       details: this.sanitize(entry.details),
+      error: this.sanitize(entry.error),
     };
 
     this.logs.unshift(fullEntry);
@@ -29,7 +31,7 @@ export class Logger {
 
     const level = entry.success ? 'INFO' : 'WARN';
     const tag = `[FOxty:${entry.actionType}]`;
-    console.log(`${new Date().toLocaleTimeString()} ${level} ${tag} ${entry.event} - Decision: ${entry.decision}`);
+    console.log(`${new Date().toLocaleTimeString()} ${level} ${tag} ${fullEntry.event} - Decision: ${fullEntry.decision}`);
 
     return fullEntry;
   }
@@ -47,8 +49,12 @@ export class Logger {
     return str
       .replace(/DISCORD_TOKEN=[^\s]+/gi, 'DISCORD_TOKEN=[REDACTED]')
       .replace(/DEEPSEEK_API_KEY=[^\s]+/gi, 'DEEPSEEK_API_KEY=[REDACTED]')
-      .replace(/Bearer\s+[A-Za-z0-9_\-\.]+/gi, 'Bearer [REDACTED]');
+      .replace(/Bearer\s+[A-Za-z0-9_\-\.]+/gi, 'Bearer [REDACTED]')
+      .replace(/sk-[A-Za-z0-9]{10,}/gi, 'sk-[REDACTED]')
+      .replace(/carta:[^\n,]+/gi, 'carta:[CONTEUDO_PRIVADO_REDACTED]')
+      .replace(/letter_content:[^\n,]+/gi, 'letter_content:[CONTEUDO_PRIVADO_REDACTED]');
   }
 }
 
 export const logger = Logger.getInstance();
+

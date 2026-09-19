@@ -1,4 +1,4 @@
-import { ChannelInfo, FoxtyState } from '../types.js';
+import { ChannelInfo, FoxtyState, DeepSeekBrainConfig } from '../types.js';
 import type {
   CherryPlaceChannel,
   CherryPlaceCategory,
@@ -63,6 +63,7 @@ export interface FoxtyConfig {
   deepSeekApiKey?: string;
   deepSeekBaseUrl: string;
   deepSeekModel: string;
+  deepSeek: DeepSeekBrainConfig;
   testMode: boolean;
   port: number;
   maxBurstMessages: number;
@@ -72,13 +73,36 @@ export interface FoxtyConfig {
 }
 
 export function loadConfig(): FoxtyConfig {
+  const apiKey = process.env.DEEPSEEK_API_KEY || undefined;
+  const baseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
+  const model = process.env.DEEPSEEK_MODEL || 'deepseek-flash';
+  const temperature = parseFloat(process.env.DEEPSEEK_TEMPERATURE || '0.7');
+  const maxTokens = parseInt(process.env.DEEPSEEK_MAX_TOKENS || '600', 10);
+  const timeoutMs = parseInt(process.env.DEEPSEEK_TIMEOUT_MS || '15000', 10);
+  const thinkingMode = (process.env.DEEPSEEK_THINKING_MODE as any) || 'none';
+  const reasoningEffort = (process.env.DEEPSEEK_REASONING_EFFORT as any) || undefined;
+  const allowHeuristicFallback = process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK === 'true' || process.env.TEST_MODE !== 'false';
+
+  const deepSeekConfig: DeepSeekBrainConfig = {
+    apiKey,
+    baseUrl,
+    model,
+    temperature,
+    maxTokens,
+    timeoutMs,
+    thinkingMode,
+    reasoningEffort,
+    allowHeuristicFallback,
+  };
+
   return {
     discordToken: process.env.DISCORD_TOKEN || undefined,
     discordClientId: process.env.DISCORD_CLIENT_ID || undefined,
     discordGuildId: process.env.DISCORD_GUILD_ID || CHERRY_PLACE_SERVER.id,
-    deepSeekApiKey: process.env.DEEPSEEK_API_KEY || undefined,
-    deepSeekBaseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
-    deepSeekModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+    deepSeekApiKey: apiKey,
+    deepSeekBaseUrl: baseUrl,
+    deepSeekModel: model,
+    deepSeek: deepSeekConfig,
     testMode: process.env.TEST_MODE !== 'false',
     port: parseInt(process.env.PORT || '3000', 10),
     maxBurstMessages: 3,
@@ -95,3 +119,4 @@ export function loadConfig(): FoxtyConfig {
     },
   };
 }
+

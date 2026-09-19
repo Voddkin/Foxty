@@ -69,11 +69,13 @@ export class FoxtyCore {
     this.eventEngine = new EventEngine(config.globalEventCooldownMinutes);
     this.contextBuilder = new ContextBuilder(this.memoryStore);
     this.serverMapValidator = new ServerMapValidator();
-    this.deepSeekAdapter = new DeepSeekAdapter({
-      apiKey: config.deepSeekApiKey,
-      baseUrl: config.deepSeekBaseUrl,
-      model: config.deepSeekModel,
-    });
+    this.deepSeekAdapter = new DeepSeekAdapter(
+      config.deepSeek || {
+        apiKey: config.deepSeekApiKey,
+        baseUrl: config.deepSeekBaseUrl,
+        model: config.deepSeekModel,
+      }
+    );
     this.toolRegistry = new ToolRegistry();
     this.toolExecutor = new ToolExecutor(
       this.toolRegistry,
@@ -172,6 +174,22 @@ export class FoxtyCore {
     return this.config.channels[0];
   }
 
+  public getDeepSeekAdapter(): DeepSeekAdapter {
+    return this.deepSeekAdapter;
+  }
+
+  public getContextBuilder(): ContextBuilder {
+    return this.contextBuilder;
+  }
+
+  public getToolRegistry(): ToolRegistry {
+    return this.toolRegistry;
+  }
+
+  public getToolExecutor(): ToolExecutor {
+    return this.toolExecutor;
+  }
+
   // ==========================================
   // Core Pipeline Execution
   // ==========================================
@@ -182,9 +200,17 @@ export class FoxtyCore {
     messageId?: string;
     isBot?: boolean;
     isDirectMention?: boolean;
+    repliedMessage?: { author: string; content: string } | null;
   }): Promise<InteractionResult> {
     const startTime = Date.now();
-    const { channelId, author, content, isBot = false, isDirectMention = false } = params;
+    const {
+      channelId,
+      author,
+      content,
+      isBot = false,
+      isDirectMention = false,
+      repliedMessage = null,
+    } = params;
 
     // Ignore bot messages by default to prevent feedback loops
     if (isBot && !author.toLowerCase().includes('foxty-test')) {
@@ -301,6 +327,8 @@ export class FoxtyCore {
       observations: [observation],
       state: currentState,
       availableTools: this.toolRegistry.getAvailableTools(),
+      isDirectMention,
+      repliedMessage,
     });
 
     // 5. DeepSeek Brain Evaluation (Only suggests behavior; does NOT authorize)
@@ -339,7 +367,8 @@ export class FoxtyCore {
     if (brainResult.decision.reactions && brainResult.decision.reactions.length > 0 && params.messageId) {
       const allowedReactions = this.channelBehaviorPolicy.filterProposedReactions(
         brainResult.decision.reactions,
-        channel
+        channel,
+        isDirectMention ? () => 0 : undefined
       );
 
       for (const emoji of allowedReactions) {

@@ -158,14 +158,75 @@ export interface MemoryCandidate {
   targetUser?: 'Kris' | 'Riely' | 'Other';
 }
 
+export interface FoxtyIdentityContext {
+  name: string;
+  species: string;
+  color: string;
+  residentOf: string;
+  personality: string[];
+  speechStyle: string[];
+  characteristics: string[];
+  behavioralTendencies: string[];
+  boundaries: string[];
+}
+
+export interface CurrentLocationContext {
+  guild: { id: string; name: string };
+  category: { id?: string; name: string; decoratedName?: string };
+  channel: { id: string; name: string; decoratedName?: string; type: string };
+  purpose: string;
+  thematicContext: string;
+  foxtyPolicy: FoxtyChannelPolicy;
+  presenceLevel: string;
+  limitations: string;
+  specialRules: string;
+  isProtected: boolean;
+}
+
+export interface CurrentEventContext {
+  eventType: 'chat_message' | 'direct_mention' | 'slash_command' | 'scheduled_tick' | 'reaction_event' | 'custom';
+  author: { name: string; isBot: boolean };
+  content: string;
+  repliedMessage?: { author: string; content: string } | null;
+  mentions: { directMentionOfFoxty: boolean; otherMentions: string[] };
+  recentConversationWindow: Array<{ author: string; content: string; timestamp: string }>;
+}
+
+export interface MemoryAndStateContext {
+  relevantMemories: Array<{ content: string; type: string; safeForTeasing: boolean; targetUser?: string }>;
+  foxtyState: FoxtyState;
+  participants: string[];
+  behavioralObservations: BehavioralObservation[];
+}
+
+export type StructuredDecisionAction =
+  | 'respond'
+  | 'ignore'
+  | 'react'
+  | 'react_only'
+  | 'tool_call'
+  | 'respond_and_tool'
+  | 'custom'
+  | 'do_nothing';
+
+export interface ToolCall {
+  name: string;
+  arguments: Record<string, any>;
+}
+
 export interface BrainDecision {
   decision: 'respond' | 'ignore' | 'react_only';
+  action?: StructuredDecisionAction;
   tone: ToneType;
   messages: string[];
+  message?: string;
   mode?: 'single' | 'burst';
   reactions?: string[];
+  reaction?: string | null;
+  tool_calls?: ToolCall[];
   memoryCandidates?: MemoryCandidate[];
   actionRequests?: ActionRequest[];
+  reason?: string;
   reasoning?: string;
 }
 
@@ -176,8 +237,12 @@ export interface ContextPackage {
     residentOf: string;
     nature: string[];
   };
+  identity?: FoxtyIdentityContext;
   channel: ChannelInfo;
   location: SemanticLocationContext;
+  currentLocation?: CurrentLocationContext;
+  event?: CurrentEventContext;
+  memoryAndState?: MemoryAndStateContext;
   participants: string[];
   recentMessages: ChatMessage[];
   relevantMemories: MemoryItem[];
@@ -340,5 +405,24 @@ export interface ServerMapValidationReport {
   unexpectedEntities: UnexpectedEntity[];
   allFindings: ValidationFinding[];
   summaryMarkdown: string;
+}
+
+// ----------------------------------------------------------------------------
+// DEEPSEEK BRAIN CONFIGURATION TYPES
+// ----------------------------------------------------------------------------
+export type ThinkingMode = 'none' | 'enabled' | 'auto';
+export type ReasoningEffort = 'low' | 'medium' | 'high';
+
+export interface DeepSeekBrainConfig {
+  apiKey?: string;
+  baseUrl: string;
+  model: string;
+  temperature: number;
+  maxTokens: number;
+  timeoutMs: number;
+  thinkingMode?: ThinkingMode;
+  reasoningEffort?: ReasoningEffort;
+  allowHeuristicFallback: boolean;
+  fetchFn?: typeof fetch;
 }
 

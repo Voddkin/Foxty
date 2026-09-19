@@ -12,6 +12,7 @@ import { EventEngine } from '../src/events/EventEngine.js';
 import { runServerModelTestSuite } from './test_server_model.js';
 import { runChannelBehaviorPolicyTests } from './test_channel_behavior_policy.js';
 import { runServerMapValidatorTests } from './test_server_map_validator.js';
+import { runDeepSeekBrainTestSuite } from './deepseek-brain.test.js';
 
 let passed = 0;
 let failed = 0;
@@ -261,6 +262,12 @@ async function runTestSuite() {
   const validatorResults = await runServerMapValidatorTests();
   if (validatorResults.failed > 0) {
     failed += validatorResults.failed;
+  }
+
+  // 17. DeepSeek Brain Real Integration (V4.1-Flash) Verification
+  const deepSeekResults = await runDeepSeekBrainTestSuite();
+  if (deepSeekResults.failed > 0) {
+    failed += deepSeekResults.failed;
   }
 
   console.log('\n=============================================');
