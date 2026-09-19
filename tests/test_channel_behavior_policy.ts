@@ -391,8 +391,13 @@ export async function runChannelBehaviorPolicyTests(): Promise<{ passed: number;
   // ==========================================
   console.log('\nGroup 7: Core Pipeline End-to-End Enforcement');
 
+  const baseConfig = loadConfig();
   const core = new FoxtyCore({
-    ...loadConfig(),
+    ...baseConfig,
+    deepSeek: {
+      ...baseConfig.deepSeek,
+      allowHeuristicFallback: true,
+    },
     testMode: true,
   });
 

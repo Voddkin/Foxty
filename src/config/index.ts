@@ -81,7 +81,7 @@ export function loadConfig(): FoxtyConfig {
   const timeoutMs = parseInt(process.env.DEEPSEEK_TIMEOUT_MS || '15000', 10);
   const thinkingMode = (process.env.DEEPSEEK_THINKING_MODE as any) || 'none';
   const reasoningEffort = (process.env.DEEPSEEK_REASONING_EFFORT as any) || undefined;
-  const allowHeuristicFallback = process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK === 'true' || process.env.TEST_MODE !== 'false';
+  const allowHeuristicFallback = process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK === 'true';
 
   const deepSeekConfig: DeepSeekBrainConfig = {
     apiKey,

@@ -72,6 +72,118 @@ async function runTests() {
     assert.strictEqual(adapter.getConfig().baseUrl, customBaseUrl);
   });
 
+  // 3.1 Semântica de Config: DEEPSEEK_ALLOW_HEURISTIC_FALLBACK=false é mantido mesmo com TEST_MODE=true
+  await test('3.1 loadConfig respects DEEPSEEK_ALLOW_HEURISTIC_FALLBACK=false when TEST_MODE=true', () => {
+    const origFallback = process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK;
+    const origTestMode = process.env.TEST_MODE;
+    try {
+      process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK = 'false';
+      process.env.TEST_MODE = 'true';
+      const cfg = loadConfig();
+      assert.strictEqual(cfg.deepSeek.allowHeuristicFallback, false);
+    } finally {
+      if (origFallback !== undefined) process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK = origFallback;
+      else delete process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK;
+      if (origTestMode !== undefined) process.env.TEST_MODE = origTestMode;
+      else delete process.env.TEST_MODE;
+    }
+  });
+
+  // 3.2 Semântica de Config: DEEPSEEK_ALLOW_HEURISTIC_FALLBACK=true é mantido mesmo com TEST_MODE=false
+  await test('3.2 loadConfig respects DEEPSEEK_ALLOW_HEURISTIC_FALLBACK=true when TEST_MODE=false', () => {
+    const origFallback = process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK;
+    const origTestMode = process.env.TEST_MODE;
+    try {
+      process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK = 'true';
+      process.env.TEST_MODE = 'false';
+      const cfg = loadConfig();
+      assert.strictEqual(cfg.deepSeek.allowHeuristicFallback, true);
+    } finally {
+      if (origFallback !== undefined) process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK = origFallback;
+      else delete process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK;
+      if (origTestMode !== undefined) process.env.TEST_MODE = origTestMode;
+      else delete process.env.TEST_MODE;
+    }
+  });
+
+  // 3.2b Semântica de Config: Sem DEEPSEEK_ALLOW_HEURISTIC_FALLBACK, o default é false independentemente de TEST_MODE
+  await test('3.2b loadConfig defaults DEEPSEEK_ALLOW_HEURISTIC_FALLBACK to false when unset regardless of TEST_MODE', () => {
+    const origFallback = process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK;
+    const origTestMode = process.env.TEST_MODE;
+    try {
+      delete process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK;
+      process.env.TEST_MODE = 'true';
+      const cfgTrue = loadConfig();
+      assert.strictEqual(cfgTrue.deepSeek.allowHeuristicFallback, false);
+
+      process.env.TEST_MODE = 'false';
+      const cfgFalse = loadConfig();
+      assert.strictEqual(cfgFalse.deepSeek.allowHeuristicFallback, false);
+    } finally {
+      if (origFallback !== undefined) process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK = origFallback;
+      else delete process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK;
+      if (origTestMode !== undefined) process.env.TEST_MODE = origTestMode;
+      else delete process.env.TEST_MODE;
+    }
+  });
+
+  const testMemStore = new InMemoryStore();
+  const testCtxBuilder = new ContextBuilder(testMemStore, { recentHistoryLimit: 5, memoryLimit: 3 });
+  const testCanonicalChan = getChannelById(CHERRY_PLACE_CHANNEL_IDS.CONVERSAS_DIARIAS)!;
+  const testChanInfo: ChannelInfo = {
+    id: testCanonicalChan.id,
+    name: testCanonicalChan.name,
+    category: 'Praça Principal',
+    type: 'social',
+    isProtected: false,
+    allowSpontaneousEvents: true,
+    toneGuidance: 'Casual',
+    foxtyPolicy: testCanonicalChan.foxtyPolicy,
+  };
+  const dummyCtx = await testCtxBuilder.buildContext({
+    channel: testChanInfo,
+    recentMessages: [{ id: '1', author: 'Kris', channelId: testChanInfo.id, content: 'Oi', timestamp: new Date().toISOString(), isBot: false }],
+    observations: [],
+    state: { mood: 0.8, drama: 0.1, chaos: 0.1, energy: 0.8, suspicion: 0.1, curiosity: 0.8, talkativeness: 0.5 },
+    availableTools: ['send_message'],
+  });
+
+  // 3.3 Sem chave de API: inação se fallback=false, heurística se fallback=true
+  await test('3.3 Missing API key behavior: inaction when fallback=false, heuristic when fallback=true', async () => {
+    const adapterNoFallback = new DeepSeekAdapter({ allowHeuristicFallback: false });
+    const resNoFallback = await adapterNoFallback.evaluate(dummyCtx);
+    assert.strictEqual(resNoFallback.error, 'DEEPSEEK_API_KEY_MISSING');
+    assert.strictEqual(resNoFallback.decision.decision, 'ignore');
+    assert.strictEqual(resNoFallback.aiUsed, false);
+
+    const adapterWithFallback = new DeepSeekAdapter({ allowHeuristicFallback: true });
+    const resWithFallback = await adapterWithFallback.evaluate(dummyCtx);
+    assert.strictEqual(resWithFallback.error, undefined);
+    assert.strictEqual(resWithFallback.aiUsed, false);
+    assert.strictEqual(resWithFallback.decision.decision, 'respond');
+  });
+
+  // 3.4 Erro no DeepSeek (500/timeout): inação se fallback=false, heurística se fallback=true
+  await test('3.4 DeepSeek error behavior: inaction when fallback=false, heuristic when fallback=true', async () => {
+    const mockFailFetch = (async () => {
+      throw new Error('504 Gateway Timeout');
+    }) as any;
+
+    const adapterNoFallback = new DeepSeekAdapter({ apiKey: 'sk-test', allowHeuristicFallback: false });
+    adapterNoFallback.setFetchImplementation(mockFailFetch);
+    const resNoFallback = await adapterNoFallback.evaluate(dummyCtx);
+    assert.strictEqual(resNoFallback.decision.decision, 'ignore');
+    assert.strictEqual(resNoFallback.error, 'DEEPSEEK_TIMEOUT');
+    assert.strictEqual(resNoFallback.aiUsed, false);
+
+    const adapterWithFallback = new DeepSeekAdapter({ apiKey: 'sk-test', allowHeuristicFallback: true });
+    adapterWithFallback.setFetchImplementation(mockFailFetch);
+    const resWithFallback = await adapterWithFallback.evaluate(dummyCtx);
+    assert.strictEqual(resWithFallback.error, 'DEEPSEEK_TIMEOUT');
+    assert.strictEqual(resWithFallback.aiUsed, false);
+    assert.strictEqual(resWithFallback.decision.decision, 'respond');
+  });
+
   console.log('\n--- Output Validation & Schema Tests ---');
 
   // 4. resposta JSON válida é convertida para o tipo interno

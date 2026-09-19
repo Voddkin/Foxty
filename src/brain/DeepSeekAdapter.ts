@@ -251,7 +251,7 @@ export class DeepSeekAdapter {
         tokenDetails,
       };
     } catch (err: any) {
-      const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError' || err.message?.includes('timeout');
+      const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError' || err.message?.toLowerCase().includes('timeout');
       const errorCode = isTimeout ? 'DEEPSEEK_TIMEOUT' : err.message || 'DEEPSEEK_UNEXPECTED_ERROR';
       const durationMs = Date.now() - startTime;
 

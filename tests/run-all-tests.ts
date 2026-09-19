@@ -41,7 +41,14 @@ async function runTestSuite() {
 
   // 2. Core Initialization
   console.log('\nGroup 2: Core Engine Initialization');
-  const core = new FoxtyCore(config);
+  const testConfig = {
+    ...config,
+    deepSeek: {
+      ...config.deepSeek,
+      allowHeuristicFallback: true,
+    },
+  };
+  const core = new FoxtyCore(testConfig);
   assert(core !== null, 'FoxtyCore instances created successfully');
   assert(core.getStateManager().getState().mood === config.defaultState.mood, 'State manager initializes with default state');
 
