@@ -13,16 +13,62 @@ export interface FoxtyState {
   suspicion: number;     // 0.0 - 1.0 (trusting -> highly suspicious)
 }
 
+export type ChannelType = 'text' | 'voice';
+
+export type FoxtyChannelPolicy =
+  | 'Uso Bloqueado'
+  | 'Uso Limitado'
+  | 'Uso Moderado'
+  | 'Uso Ativo'
+  | 'Uso Frequente';
+
 export type ChannelCategory = 'social' | 'planning' | 'correspondence' | 'system' | 'restricted';
+
+export type ThematicContext =
+  | 'conversa casual'
+  | 'Minecraft'
+  | 'exploração'
+  | 'coordenadas'
+  | 'metas'
+  | 'planejamento de calls'
+  | 'minigames'
+  | 'correspondência protegida'
+  | 'canais importantes';
+
+export interface SemanticLocationContext {
+  channelId: string;
+  channelName: string;
+  category: string;
+  purpose: string;
+  thematicContext: ThematicContext;
+  foxtyPresenceLevel: FoxtyChannelPolicy;
+  limitations: string;
+  isProtected: boolean;
+  specialRules: string;
+  channelType: ChannelType;
+}
 
 export interface ChannelInfo {
   id: string;
   name: string;
   category: string;
-  type: ChannelCategory;
+  type: ChannelCategory | ChannelType;
   isProtected: boolean;
   allowSpontaneousEvents: boolean;
   toneGuidance: string;
+  // Canonical fields from DISCORD_SERVER_CATEGORIES_AND_CHANNELS_RULES.md
+  technicalName?: string;
+  decoratedName?: string;
+  categoryId?: string;
+  channelType?: ChannelType;
+  order?: number;
+  purpose?: string;
+  foxtyPolicy?: FoxtyChannelPolicy;
+  isVoice?: boolean;
+  allowsMentionsResponse?: boolean;
+  thematicContext?: ThematicContext;
+  limitations?: string;
+  specialRules?: string;
 }
 
 export type MemoryType = 'episodic' | 'behavioral' | 'server' | 'project' | 'temporary';
@@ -131,6 +177,7 @@ export interface ContextPackage {
     nature: string[];
   };
   channel: ChannelInfo;
+  location: SemanticLocationContext;
   participants: string[];
   recentMessages: ChatMessage[];
   relevantMemories: MemoryItem[];
@@ -183,3 +230,115 @@ export interface AuditLogEntry {
   details?: string;
   error?: string;
 }
+
+// ----------------------------------------------------------------------------
+// SERVER MAP VALIDATOR TYPES
+// ----------------------------------------------------------------------------
+export type ValidationSeverity = 'OK' | 'INFO' | 'WARNING' | 'ERROR';
+
+export interface ValidationFinding {
+  code: string;
+  severity: ValidationSeverity;
+  targetType: 'guild' | 'category' | 'channel';
+  targetId?: string;
+  targetName?: string;
+  expected?: any;
+  actual?: any;
+  message: string;
+}
+
+export interface DiscordServerSnapshot {
+  guildId: string;
+  guildName: string;
+  categories: Array<{
+    id: string;
+    name: string;
+    position?: number;
+  }>;
+  channels: Array<{
+    id: string;
+    name: string;
+    type: 'text' | 'voice' | string;
+    parentId?: string | null;
+    position?: number;
+  }>;
+}
+
+export interface CategoryValidationResult {
+  canonicalId: string;
+  canonicalName: string;
+  decoratedName: string;
+  expectedOrder: number;
+  status: 'MATCH' | 'MISSING' | 'DIVERGENT';
+  actualId?: string;
+  actualName?: string;
+  actualPosition?: number;
+  channelsSummary: {
+    totalExpected: number;
+    matched: number;
+    missing: number;
+    divergent: number;
+  };
+  findings: ValidationFinding[];
+}
+
+export interface ChannelValidationResult {
+  canonicalId: string;
+  canonicalName: string;
+  technicalName: string;
+  decoratedName: string;
+  expectedType: ChannelType;
+  expectedCategoryId: string;
+  expectedCategoryName: string;
+  expectedOrder: number;
+  status: 'MATCH' | 'MISSING' | 'DIVERGENT';
+  actualId?: string;
+  actualName?: string;
+  actualType?: string;
+  actualParentId?: string | null;
+  actualPosition?: number;
+  findings: ValidationFinding[];
+}
+
+export interface UnexpectedEntity {
+  id: string;
+  name: string;
+  type: 'category' | 'channel';
+  parentId?: string | null;
+  channelType?: string;
+  position?: number;
+}
+
+export interface ServerMapValidationReport {
+  timestamp: string;
+  status: 'PERFECT_MATCH' | 'COMPLIANT_WITH_WARNINGS' | 'CRITICAL_DIVERGENCES';
+  isSafeAndNonDestructive: true;
+  guildValidation: {
+    canonicalId: string;
+    canonicalName: string;
+    actualId?: string;
+    actualName?: string;
+    isGuildIdMatch: boolean;
+    isGuildNameMatch: boolean;
+    findings: ValidationFinding[];
+  };
+  metrics: {
+    totalExpectedCategories: number;
+    matchedCategories: number;
+    missingCategories: number;
+    totalExpectedChannels: number;
+    matchedChannels: number;
+    missingChannels: number;
+    unexpectedChannelsCount: number;
+    unexpectedCategoriesCount: number;
+    criticalErrorsCount: number;
+    warningsCount: number;
+    complianceScore: number;
+  };
+  categories: CategoryValidationResult[];
+  channels: ChannelValidationResult[];
+  unexpectedEntities: UnexpectedEntity[];
+  allFindings: ValidationFinding[];
+  summaryMarkdown: string;
+}
+

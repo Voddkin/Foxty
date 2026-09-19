@@ -3,11 +3,18 @@ import {
   BrainDecision,
   ChannelInfo,
   ChatMessage,
+  DiscordServerSnapshot,
   FoxtyState,
   MemoryItem,
   SakuraMailAbstractEvent,
+  ServerMapValidationReport,
 } from '../types.js';
-import { FoxtyConfig } from '../config/index.js';
+import {
+  FoxtyConfig,
+  isSakuraMailChannel,
+  isChannelBlocked,
+  getChannelById,
+} from '../config/index.js';
 import { ContextBuilder } from './ContextBuilder.js';
 import { StateManager } from './StateManager.js';
 import { Logger, logger } from './Logger.js';
@@ -20,6 +27,12 @@ import { DeepSeekAdapter } from '../brain/DeepSeekAdapter.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
 import { DiscordActionHandler, ToolExecutionResult, ToolExecutor } from '../tools/ToolExecutor.js';
 import { SakuraMailBridge, SakuraMailRawInput } from '../integrations/SakuraMailBridge.js';
+import { ServerMapValidator } from '../validator/ServerMapValidator.js';
+import {
+  ChannelBehaviorPolicy,
+  ChannelPolicyLevel,
+  PreConsultationDecision,
+} from '../policy/ChannelBehaviorPolicy.js';
 
 export interface InteractionResult {
   decision: BrainDecision;
@@ -42,6 +55,9 @@ export class FoxtyCore {
   private toolRegistry: ToolRegistry;
   private toolExecutor: ToolExecutor;
   private sakuraMailBridge: SakuraMailBridge;
+  private channelBehaviorPolicy: ChannelBehaviorPolicy;
+  private serverMapValidator: ServerMapValidator;
+  private discordHandler?: DiscordActionHandler;
   private recentMessagesBuffer: Map<string, ChatMessage[]> = new Map();
 
   constructor(private config: FoxtyConfig) {
@@ -49,8 +65,10 @@ export class FoxtyCore {
     this.stateManager = new StateManager(config.defaultState);
     this.behavioralAnalyzer = new BehavioralAnalyzer();
     this.personalityEngine = new PersonalityEngine();
+    this.channelBehaviorPolicy = new ChannelBehaviorPolicy();
     this.eventEngine = new EventEngine(config.globalEventCooldownMinutes);
     this.contextBuilder = new ContextBuilder(this.memoryStore);
+    this.serverMapValidator = new ServerMapValidator();
     this.deepSeekAdapter = new DeepSeekAdapter({
       apiKey: config.deepSeekApiKey,
       baseUrl: config.deepSeekBaseUrl,
@@ -78,7 +96,40 @@ export class FoxtyCore {
   }
 
   public setDiscordActionHandler(handler: DiscordActionHandler): void {
+    this.discordHandler = handler;
     this.toolExecutor.setDiscordHandler(handler);
+  }
+
+  public getServerMapValidator(): ServerMapValidator {
+    return this.serverMapValidator;
+  }
+
+  /**
+   * Validates the server map against the connected Discord server or provided snapshot.
+   */
+  public async validateServerMap(snapshot?: DiscordServerSnapshot): Promise<ServerMapValidationReport> {
+    let actualSnapshot: DiscordServerSnapshot | undefined = snapshot;
+
+    if (!actualSnapshot) {
+      if (this.discordHandler && typeof this.discordHandler.getServerSnapshot === 'function') {
+        actualSnapshot = await this.discordHandler.getServerSnapshot();
+      }
+    }
+
+    const snapshotToValidate = actualSnapshot || ServerMapValidator.getCanonicalSnapshot();
+    const report = this.serverMapValidator.validate(snapshotToValidate);
+
+    logger.log({
+      event: `Server Map Audit Executed: ${report.status}`,
+      actionType: 'SERVER_MAP_AUDIT',
+      decision: report.status,
+      success: report.status !== 'CRITICAL_DIVERGENCES',
+      aiUsed: false,
+      durationMs: 0,
+      details: `Compliance Score: ${report.metrics.complianceScore}%, Matched Channels: ${report.metrics.matchedChannels}/${report.metrics.totalExpectedChannels}, Findings: ${report.allFindings.length}`,
+    });
+
+    return report;
   }
 
   public getMemoryStore(): IMemoryStore {
@@ -95,6 +146,10 @@ export class FoxtyCore {
 
   public getSakuraMailBridge(): SakuraMailBridge {
     return this.sakuraMailBridge;
+  }
+
+  public getChannelBehaviorPolicy(): ChannelBehaviorPolicy {
+    return this.channelBehaviorPolicy;
   }
 
   public handleSakuraMailEvent(raw: SakuraMailRawInput): {
@@ -172,26 +227,36 @@ export class FoxtyCore {
     // 1. Behavioral Analysis with previous channel history
     const previousHistory = buffer.slice(0, -1);
     const observation = this.behavioralAnalyzer.analyze(author, content, previousHistory);
-
-    // 2. Personality decision: check if Foxty should stay silent (if not directly mentioned)
     const currentState = this.stateManager.getState();
-    const shouldSilence = this.personalityEngine.shouldStaySilent(currentState, isDirectMention);
 
-    if (shouldSilence && !isDirectMention) {
+    // 2. Authoritative Channel Behavior Policy Pre-Consultation Gate
+    // The Core MUST determine the policy before consulting DeepSeek.
+    const policyEvaluation = this.channelBehaviorPolicy.evaluatePreConsultation({
+      channel,
+      isDirectMention,
+      currentTime: startTime,
+    });
+
+    if (!policyEvaluation.shouldProceedToBrain) {
       logger.log({
-        event: 'Foxty Chose Silence (Economical Persona)',
+        event: 'Foxty Channel Policy Gate: Skipped Brain Consultation',
         channelId,
         author,
-        actionType: 'PERSONA_DECISION',
+        actionType: 'POLICY_GATE',
         decision: 'SILENCE',
         success: true,
         aiUsed: false,
         durationMs: Date.now() - startTime,
-        details: `Author: ${author}, Content: "${content.substring(0, 40)}"`,
+        details: `Level: ${policyEvaluation.policy.level}, Reason: ${policyEvaluation.reason}, Mention: ${isDirectMention}`,
       });
 
       return {
-        decision: { decision: 'ignore', tone: 'neutral', messages: [], reasoning: 'Economical silence' },
+        decision: {
+          decision: 'ignore',
+          tone: 'neutral',
+          messages: [],
+          reasoning: policyEvaluation.reason,
+        },
         toolResults: [],
         state: currentState,
         observations: [observation],
@@ -201,7 +266,34 @@ export class FoxtyCore {
       };
     }
 
-    // 3. Build Context Package
+    // 3. Personality engine secondary economy check (for non-mentions)
+    const shouldSilence = this.personalityEngine.shouldStaySilent(currentState, isDirectMention, channel);
+
+    if (shouldSilence) {
+      logger.log({
+        event: 'Foxty Chose Silence (Personality Economy)',
+        channelId,
+        author,
+        actionType: 'PERSONA_DECISION',
+        decision: 'SILENCE',
+        success: true,
+        aiUsed: false,
+        durationMs: Date.now() - startTime,
+        details: `Policy: ${channel.foxtyPolicy || 'default'}, Mention: ${isDirectMention}, Author: ${author}`,
+      });
+
+      return {
+        decision: { decision: 'ignore', tone: 'neutral', messages: [], reasoning: 'Silence enforced by persona economy' },
+        toolResults: [],
+        state: currentState,
+        observations: [observation],
+        memoriesRetrieved: [],
+        aiUsed: false,
+        tokensUsed: 0,
+      };
+    }
+
+    // 4. Build Context Package
     const context = await this.contextBuilder.buildContext({
       channel,
       currentMessage,
@@ -211,21 +303,23 @@ export class FoxtyCore {
       availableTools: this.toolRegistry.getAvailableTools(),
     });
 
-    // 4. DeepSeek Brain Evaluation
+    // 5. DeepSeek Brain Evaluation (Only suggests behavior; does NOT authorize)
     const brainResult = await this.deepSeekAdapter.evaluate(
       context,
       isDirectMention ? `User ${author} is directly addressing you: "${content}"` : undefined
     );
 
-    // 5. Tool Validation & Execution Pipeline
+    // 6. Post-Evaluation Core Guardrails: DeepSeek only suggests; the Core enforces
     const toolResults: ToolExecutionResult[] = [];
 
-    // If decision is to respond, format send_message actions
+    // 6a. Filter and execute messages according to channel policy burst and permissions
     if (brainResult.decision.decision === 'respond' && brainResult.decision.messages.length > 0) {
-      // Respect max burst limits
-      const messagesToSend = brainResult.decision.messages.slice(0, this.config.maxBurstMessages);
+      const allowedMessages = this.channelBehaviorPolicy.filterProposedMessages(
+        brainResult.decision.messages,
+        channel
+      );
 
-      for (const msg of messagesToSend) {
+      for (const msg of allowedMessages) {
         const sendResult = await this.toolExecutor.execute(
           {
             tool: 'send_message',
@@ -235,11 +329,20 @@ export class FoxtyCore {
         );
         toolResults.push(sendResult);
       }
+
+      if (allowedMessages.length > 0) {
+        this.channelBehaviorPolicy.recordResponse(channel.id, Date.now());
+      }
     }
 
-    // Execute any reactions proposed
+    // 6b. Filter and execute reactions strictly according to channel policy
     if (brainResult.decision.reactions && brainResult.decision.reactions.length > 0 && params.messageId) {
-      for (const emoji of brainResult.decision.reactions) {
+      const allowedReactions = this.channelBehaviorPolicy.filterProposedReactions(
+        brainResult.decision.reactions,
+        channel
+      );
+
+      for (const emoji of allowedReactions) {
         const reactResult = await this.toolExecutor.execute(
           {
             tool: 'react',
@@ -255,16 +358,34 @@ export class FoxtyCore {
       }
     }
 
-    // Execute any explicit tool actions proposed by model
+    // 6c. Filter and execute action requests strictly according to channel policy
     if (brainResult.decision.actionRequests && brainResult.decision.actionRequests.length > 0) {
-      for (const req of brainResult.decision.actionRequests) {
-        const actionResult = await this.toolExecutor.execute(req as ActionRequest, channel);
+      const { approved, rejected } = this.channelBehaviorPolicy.filterProposedTools(
+        brainResult.decision.actionRequests as ActionRequest[],
+        channel
+      );
+
+      // Log any rejected unauthorized suggestions from DeepSeek
+      for (const rej of rejected) {
+        toolResults.push({
+          tool: rej.action.tool,
+          success: false,
+          error: `[Core Policy Violation] ${rej.reason}`,
+        });
+      }
+
+      for (const req of approved) {
+        const actionResult = await this.toolExecutor.execute(req, channel);
         toolResults.push(actionResult);
       }
     }
 
-    // Save any suggested memories (with confidence threshold and strict privacy filtering)
-    if (brainResult.decision.memoryCandidates && channel.id !== 'ch-sakura-mail') {
+    // 6d. Save memories ONLY if channel policy allows memory accumulation
+    if (
+      brainResult.decision.memoryCandidates &&
+      policyEvaluation.policy.canSaveMemories &&
+      !isSakuraMailChannel(channel.id)
+    ) {
       for (const candidate of brainResult.decision.memoryCandidates) {
         if (candidate.confidence >= 0.85 && candidate.content && candidate.content.trim().length >= 3) {
           const lower = candidate.content.toLowerCase();
@@ -314,6 +435,46 @@ export class FoxtyCore {
     channelId: string;
   }): Promise<{ reply: string; decision: BrainDecision; toolResults: ToolExecutionResult[] }> {
     const { subcommand, prompt, author, channelId } = params;
+
+    // Strict boundary: blocked channels prohibit any interactive presence
+    if (isChannelBlocked(channelId)) {
+      return {
+        reply: '🦊 *Foxty permanece em silêncio e não intervém neste canal.*',
+        decision: { decision: 'ignore', tone: 'pseudo_serious', messages: [] },
+        toolResults: [],
+      };
+    }
+
+    // Subcommand: diagnostico / mapa / audit
+    if (
+      subcommand === 'diagnostico' ||
+      subcommand === 'mapa' ||
+      subcommand === 'audit' ||
+      (prompt && (prompt.toLowerCase() === 'diagnostico' || prompt.toLowerCase() === 'mapa' || prompt.toLowerCase() === 'audit'))
+    ) {
+      const report = await this.validateServerMap();
+      const statusEmoji =
+        report.status === 'PERFECT_MATCH' ? '✅' : report.status === 'COMPLIANT_WITH_WARNINGS' ? '⚠️' : '❌';
+
+      const shortSummary =
+        `🦊 **Diagnóstico do Mapa — Cherry Place** ${statusEmoji}\n` +
+        `• **Status**: \`${report.status}\` | **Score**: **${report.metrics.complianceScore}%**\n` +
+        `• **Guild ID**: ${report.guildValidation.isGuildIdMatch ? '✅ Conforme' : '❌ Divergente'}\n` +
+        `• **Categorias**: ${report.metrics.matchedCategories}/${report.metrics.totalExpectedCategories} OK\n` +
+        `• **Canais**: ${report.metrics.matchedChannels}/${report.metrics.totalExpectedChannels} OK (Ausentes: ${report.metrics.missingChannels} | Inesperados: ${report.metrics.unexpectedChannelsCount})\n` +
+        `• **Achados**: ${report.allFindings.length} (${report.metrics.criticalErrorsCount} erros, ${report.metrics.warningsCount} alertas)\n` +
+        `\n*Dica: Abra o Dashboard Web para ver a árvore visual completa e exportar o relatório completo.*`;
+
+      return {
+        reply: shortSummary,
+        decision: {
+          decision: 'respond',
+          tone: 'pseudo_serious',
+          messages: [shortSummary],
+        },
+        toolResults: [],
+      };
+    }
 
     // Subcommand: status
     if (subcommand === 'status' || (!prompt && !subcommand)) {

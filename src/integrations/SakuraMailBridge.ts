@@ -1,5 +1,6 @@
 import { SakuraMailAbstractEvent, SakuraMailEventType } from '../types.js';
 import { logger } from '../core/Logger.js';
+import { CHERRY_PLACE_CHANNEL_IDS } from '../config/index.js';
 
 export interface SakuraMailRawInput {
   type: SakuraMailEventType;
@@ -34,7 +35,7 @@ export class SakuraMailBridge {
         'CRITICAL PRIVACY BOUNDARY: Attempted letter content in SakuraMail payload was intercepted and stripped.';
       logger.log({
         event: 'SakuraMail Privacy Barrier Triggered',
-        channelId: raw.channelId || 'ch-sakura-mail',
+        channelId: raw.channelId || CHERRY_PLACE_CHANNEL_IDS.CAIXA_DE_CORREIO,
         author: raw.user,
         actionType: 'PRIVACY_FIREWALL',
         decision: 'STRIPPED',
@@ -59,7 +60,7 @@ export class SakuraMailBridge {
       type: raw.type,
       user: raw.user,
       timestamp: new Date().toISOString(),
-      channelId: raw.channelId || 'ch-sakura-mail',
+      channelId: raw.channelId || CHERRY_PLACE_CHANNEL_IDS.CAIXA_DE_CORREIO,
     };
 
     this.abstractEventsHistory.push(abstractEvent);

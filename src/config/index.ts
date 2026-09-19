@@ -1,4 +1,60 @@
 import { ChannelInfo, FoxtyState } from '../types.js';
+import type {
+  CherryPlaceChannel,
+  CherryPlaceCategory,
+  CherryPlaceServerInfo,
+  CherryPlaceMember,
+  ChannelType,
+  FoxtyChannelPolicy,
+} from './cherryPlaceModel.js';
+import {
+  CHERRY_PLACE_CHANNELS,
+  CHERRY_PLACE_CATEGORIES,
+  CHERRY_PLACE_SERVER,
+  CHERRY_PLACE_MEMBERS,
+  CHERRY_PLACE_CHANNEL_IDS,
+  CHERRY_PLACE_CATEGORY_IDS,
+  CHERRY_PLACE_MEMBER_IDS,
+  getChannelById,
+  getCategoryById,
+  getChannelsByCategoryId,
+  isChannelBlocked,
+  isVoiceChannel,
+  isSakuraMailChannel,
+  getChannelUsagePolicy,
+  canFoxtyInteractInChannel,
+  getAllChannels,
+  getAllCategories,
+} from './cherryPlaceModel.js';
+
+export type {
+  CherryPlaceChannel,
+  CherryPlaceCategory,
+  CherryPlaceServerInfo,
+  CherryPlaceMember,
+  ChannelType,
+  FoxtyChannelPolicy,
+};
+
+export {
+  CHERRY_PLACE_CHANNELS,
+  CHERRY_PLACE_CATEGORIES,
+  CHERRY_PLACE_SERVER,
+  CHERRY_PLACE_MEMBERS,
+  CHERRY_PLACE_CHANNEL_IDS,
+  CHERRY_PLACE_CATEGORY_IDS,
+  CHERRY_PLACE_MEMBER_IDS,
+  getChannelById,
+  getCategoryById,
+  getChannelsByCategoryId,
+  isChannelBlocked,
+  isVoiceChannel,
+  isSakuraMailChannel,
+  getChannelUsagePolicy,
+  canFoxtyInteractInChannel,
+  getAllChannels,
+  getAllCategories,
+};
 
 export interface FoxtyConfig {
   discordToken?: string;
@@ -11,72 +67,15 @@ export interface FoxtyConfig {
   port: number;
   maxBurstMessages: number;
   globalEventCooldownMinutes: number;
-  channels: ChannelInfo[];
+  channels: readonly ChannelInfo[];
   defaultState: FoxtyState;
 }
-
-export const CHERRY_PLACE_CHANNELS: ChannelInfo[] = [
-  {
-    id: 'ch-daily-talk',
-    name: '💬 — conversas・diárias',
-    category: 'The Little Riri ✧･ﾟ',
-    type: 'social',
-    isProtected: false,
-    allowSpontaneousEvents: true,
-    toneGuidance: 'High narrative freedom, playful, observant, teasing and spontaneous banter.',
-  },
-  {
-    id: 'ch-build-ideas',
-    name: '🏡 — ideias・de・construção',
-    category: 'The Little Riri ✧･ﾟ',
-    type: 'planning',
-    isProtected: false,
-    allowSpontaneousEvents: true,
-    toneGuidance: 'Attentive to Minecraft builds, materials, cherry blossoms, house layouts.',
-  },
-  {
-    id: 'ch-maps-exploration',
-    name: '🌎 — mapas・e・explorações',
-    category: 'The Little Riri ✧･ﾟ',
-    type: 'planning',
-    isProtected: false,
-    allowSpontaneousEvents: true,
-    toneGuidance: 'Curious about biomes, caves, expeditions, rare structures.',
-  },
-  {
-    id: 'ch-important-coords',
-    name: '📌 — coordenadas・importantes',
-    category: 'The Little Riri ✧･ﾟ',
-    type: 'restricted',
-    isProtected: true,
-    allowSpontaneousEvents: false,
-    toneGuidance: 'Caution first. Accurate information, no playful distortions of crucial coordinates.',
-  },
-  {
-    id: 'ch-topics-to-talk',
-    name: '📝 — assuntos・para・falar',
-    category: 'Planner da Riri ✧･ﾟ',
-    type: 'planning',
-    isProtected: false,
-    allowSpontaneousEvents: false,
-    toneGuidance: 'Organized, notices forgotten topics, does not act like a rigid task manager.',
-  },
-  {
-    id: 'ch-sakura-mail',
-    name: '💌 — caixa・de・correio',
-    category: '📨 Correspondencias ✧･ﾟ',
-    type: 'correspondence',
-    isProtected: true,
-    allowSpontaneousEvents: false,
-    toneGuidance: 'Strictly protected. SakuraMail is dominant. Never inspect private letter content.',
-  },
-];
 
 export function loadConfig(): FoxtyConfig {
   return {
     discordToken: process.env.DISCORD_TOKEN || undefined,
     discordClientId: process.env.DISCORD_CLIENT_ID || undefined,
-    discordGuildId: process.env.DISCORD_GUILD_ID || undefined,
+    discordGuildId: process.env.DISCORD_GUILD_ID || CHERRY_PLACE_SERVER.id,
     deepSeekApiKey: process.env.DEEPSEEK_API_KEY || undefined,
     deepSeekBaseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
     deepSeekModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',

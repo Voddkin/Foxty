@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ActionRequest, ChannelInfo } from '../types.js';
+import { isChannelBlocked, isSakuraMailChannel } from '../config/index.js';
 
 export const SendMessageArgsSchema = z.object({
   channel_id: z.string().min(1, 'channel_id is required'),
@@ -70,12 +71,20 @@ export class ToolRegistry {
       return { valid: false, error: `Unauthorized or unknown tool: ${action.tool}` };
     }
 
-    // 2. Channel policy validation (Crucial security barrier: never speak in restricted channels without explicit permission)
-    if (channel.isProtected && (action.tool === 'send_message' || action.tool === 'send_multiple_messages')) {
-      if (channel.id === 'ch-sakura-mail') {
+    // 2. Channel policy validation:
+    // "Uso Bloqueado = Foxty NÃO pode interagir com este canal. Foxty pode possuir acesso técnico para leitura, MAS não pode produzir nenhuma ação naquele canal. Nem reagir, nem nada."
+    const isInteractiveAction = ['send_message', 'send_multiple_messages', 'react'].includes(action.tool);
+    if (isInteractiveAction) {
+      if (isChannelBlocked(channel.id) || channel.foxtyPolicy === 'Uso Bloqueado') {
+        if (isSakuraMailChannel(channel.id)) {
+          return {
+            valid: false,
+            error: `Policy violation: Foxty is forbidden from automated message emission in SakuraMail mailbox channel`,
+          };
+        }
         return {
           valid: false,
-          error: `Policy violation: Foxty is forbidden from automated message emission in SakuraMail mailbox channel`,
+          error: `Policy violation: Channel '${channel.name}' has 'Uso Bloqueado'. Foxty is forbidden from interacting or reacting in this channel`,
         };
       }
     }

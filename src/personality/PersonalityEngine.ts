@@ -34,14 +34,37 @@ export class PersonalityEngine {
     return 'casual';
   }
 
-  public shouldStaySilent(state: FoxtyState, isDirectMention: boolean): boolean {
-    // Direct mentions are almost never ignored, unless suspicion or low energy is extreme
+  public shouldStaySilent(state: FoxtyState, isDirectMention: boolean, channel?: ChannelInfo): boolean {
+    // 1. Blocked channels: strictly forbidden from interacting, EVEN IF MENTIONED
+    // "Mencionar Foxty SEMPRE fará com que ele responda e apareça. MENOS PARA OS CANAIS DE 'Uso Bloqueado'."
+    if (channel?.foxtyPolicy === 'Uso Bloqueado') {
+      return true;
+    }
+
+    // 2. Direct mentions: always respond (for non-blocked channels)
     if (isDirectMention) {
       return false;
     }
 
-    // Foxty is economical with words - talkativeness controls spontaneous reply likelihood
-    const threshold = 1.0 - state.talkativeness; // e.g. 0.6 if talkativeness is 0.4
+    // 3. Frequent usage channels (Jardim Mágico, MiniGames): Foxty is deliberately and obligatorily present!
+    if (channel?.foxtyPolicy === 'Uso Frequente') {
+      return false;
+    }
+
+    // 4. Limited usage channels (Coords, Call Topics, Call Ideas): Extremely rare appearances
+    if (channel?.foxtyPolicy === 'Uso Limitado') {
+      return Math.random() < 0.95;
+    }
+
+    // 5. Moderate usage channels (Maps, Build Ideas): Occasionally chimes in
+    if (channel?.foxtyPolicy === 'Uso Moderado') {
+      const threshold = 0.80 - state.talkativeness * 0.2;
+      return Math.random() < threshold;
+    }
+
+    // 6. Active usage channels (Conversas Diárias, Conversas Cúbicas, Metas e Objetivos):
+    // Talkativeness controls spontaneous reply likelihood
+    const threshold = 1.0 - state.talkativeness * 0.9;
     const roll = Math.random();
     return roll < threshold;
   }

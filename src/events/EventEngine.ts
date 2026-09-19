@@ -1,5 +1,6 @@
 import { ChannelInfo, FoxtyEvent } from '../types.js';
 import { logger } from '../core/Logger.js';
+import { CHERRY_PLACE_CHANNEL_IDS, CHERRY_PLACE_CHANNELS } from '../config/index.js';
 
 export class EventEngine {
   private events: Map<string, FoxtyEvent> = new Map();
@@ -25,7 +26,12 @@ export class EventEngine {
         chance: 0.25,
         cooldownMinutes: 45,
         requiresAi: false,
-        allowedChannels: ['ch-daily-talk', 'ch-build-ideas', 'ch-maps-exploration'],
+        allowedChannels: [
+          CHERRY_PLACE_CHANNEL_IDS.CONVERSAS_DIARIAS,
+          CHERRY_PLACE_CHANNEL_IDS.CONVERSAS_CUBICAS,
+          CHERRY_PLACE_CHANNEL_IDS.IDEIAS_DE_CONSTRUCAO,
+          CHERRY_PLACE_CHANNEL_IDS.MAPAS_E_EXPLORACOES,
+        ],
         payload: {
           quips: [
             'alguém andou replantando cerejeiras fora do alinhamento da escada.',
@@ -45,7 +51,10 @@ export class EventEngine {
         chance: 0.15,
         cooldownMinutes: 60,
         requiresAi: false,
-        allowedChannels: ['ch-daily-talk'],
+        allowedChannels: [
+          CHERRY_PLACE_CHANNEL_IDS.CONVERSAS_DIARIAS,
+          CHERRY_PLACE_CHANNEL_IDS.JARDIM_MAGICO_DO_FOXTY,
+        ],
         payload: {
           quips: [
             'hm.',
@@ -66,7 +75,11 @@ export class EventEngine {
         chance: 0.05,
         cooldownMinutes: 120,
         requiresAi: false,
-        allowedChannels: ['ch-daily-talk', 'ch-build-ideas'],
+        allowedChannels: [
+          CHERRY_PLACE_CHANNEL_IDS.CONVERSAS_DIARIAS,
+          CHERRY_PLACE_CHANNEL_IDS.CONVERSAS_CUBICAS,
+          CHERRY_PLACE_CHANNEL_IDS.IDEIAS_DE_CONSTRUCAO,
+        ],
         payload: {
           burst: ['pera', 'pera.', 'EU TIVE UMA IDEIA PARA A BASE.'],
         },
@@ -82,9 +95,12 @@ export class EventEngine {
         chance: 0.02,
         cooldownMinutes: 240,
         requiresAi: false,
-        allowedChannels: ['ch-maps-exploration', 'ch-coordinates'],
+        allowedChannels: [
+          CHERRY_PLACE_CHANNEL_IDS.MAPAS_E_EXPLORACOES,
+          CHERRY_PLACE_CHANNEL_IDS.COORDENADAS_IMPORTANTES,
+        ],
         payload: {
-          targetChannelRedirect: 'ch-maps-exploration',
+          targetChannelRedirect: CHERRY_PLACE_CHANNEL_IDS.MAPAS_E_EXPLORACOES,
           quips: [
             'acho que encontrei uma aplicação muito específica para aquela ideia daqui.',
             'se vocês forem explorar aquele bioma hoje, não esqueçam de marcar o ponto.',
@@ -102,7 +118,10 @@ export class EventEngine {
         chance: 0.005,
         cooldownMinutes: 720,
         requiresAi: false,
-        allowedChannels: ['ch-daily-talk'],
+        allowedChannels: [
+          CHERRY_PLACE_CHANNEL_IDS.CONVERSAS_DIARIAS,
+          CHERRY_PLACE_CHANNEL_IDS.JARDIM_MAGICO_DO_FOXTY,
+        ],
         payload: {
           burst: [
             '🦊 *O vento balança as pétalas de cerejeira.*',
@@ -122,7 +141,10 @@ export class EventEngine {
         chance: 0.001,
         cooldownMinutes: 1440,
         requiresAi: false,
-        allowedChannels: ['ch-daily-talk'],
+        allowedChannels: [
+          CHERRY_PLACE_CHANNEL_IDS.CONVERSAS_DIARIAS,
+          CHERRY_PLACE_CHANNEL_IDS.MINIGAMES_DO_FOXTY,
+        ],
         payload: {
           burst: ['...', '👁️', '...vocês também ouviram isso?'],
         },
@@ -166,15 +188,10 @@ export class EventEngine {
       return { triggered: false, reason: 'Event not found' };
     }
 
-    const channel = targetChannel || {
-      id: 'ch-daily-talk',
-      name: '💬 — conversas・diárias',
-      category: 'The Little Riri ✧･ﾟ',
-      type: 'social',
-      isProtected: false,
-      allowSpontaneousEvents: true,
-      toneGuidance: 'Social banter',
-    };
+    const channel =
+      targetChannel ||
+      CHERRY_PLACE_CHANNELS.find((c) => !c.isProtected && c.allowSpontaneousEvents) ||
+      CHERRY_PLACE_CHANNELS[0];
 
     if (channel.isProtected) {
       return { triggered: false, reason: `Channel ${channel.name} is protected from spontaneous events.` };

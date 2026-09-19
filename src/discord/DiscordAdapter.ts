@@ -2,6 +2,9 @@ import { Client, GatewayIntentBits, Partials, SlashCommandBuilder, REST, Routes 
 import { FoxtyCore } from '../core/FoxtyCore.js';
 import { DiscordActionHandler } from '../tools/ToolExecutor.js';
 import { logger } from '../core/Logger.js';
+import { DiscordServerSnapshot } from '../types.js';
+import { CHERRY_PLACE_SERVER } from '../config/cherryPlaceModel.js';
+import { ServerMapValidator } from '../validator/ServerMapValidator.js';
 
 export class DiscordAdapter implements DiscordActionHandler {
   private client: Client | null = null;
@@ -74,8 +77,14 @@ export class DiscordAdapter implements DiscordActionHandler {
         if (!interaction.isChatInputCommand()) return;
 
         if (interaction.commandName === 'foxty') {
-          const subcommand = interaction.options.getSubcommand(false) || undefined;
-          const prompt = interaction.options.getString('pergunta') || interaction.options.getString('prompt') || undefined;
+          const subcommand =
+            interaction.options.getString('acao') ||
+            interaction.options.getSubcommand(false) ||
+            undefined;
+          const prompt =
+            interaction.options.getString('pergunta') ||
+            interaction.options.getString('prompt') ||
+            undefined;
 
           await interaction.deferReply();
 
@@ -88,7 +97,13 @@ export class DiscordAdapter implements DiscordActionHandler {
               channelId: interaction.channelId,
             });
 
-            await interaction.editReply(result.reply);
+            // If reply is long (e.g. detailed markdown report), Discord allows up to 2000 chars per message
+            if (result.reply.length > 2000) {
+              const truncated = result.reply.substring(0, 1990) + '...';
+              await interaction.editReply(truncated);
+            } else {
+              await interaction.editReply(result.reply);
+            }
           } catch (err: any) {
             await interaction.editReply(`🦊 *Foxty hesita...*: ${err.message}`);
           }
@@ -119,6 +134,75 @@ export class DiscordAdapter implements DiscordActionHandler {
       id: this.client.user.id,
       tag: this.client.user.tag,
     };
+  }
+
+  /**
+   * Fetches real Discord server topology snapshot in read-only mode.
+   */
+  public async getServerSnapshot(guildId?: string): Promise<DiscordServerSnapshot> {
+    const targetGuildId = guildId || this.core.getConfig().discordGuildId || CHERRY_PLACE_SERVER.id;
+
+    if (this.client && this.isConnected) {
+      try {
+        let guild = this.client.guilds.cache.get(targetGuildId);
+        if (!guild) {
+          guild = await this.client.guilds.fetch(targetGuildId);
+        }
+
+        if (guild) {
+          const fetchedChannels = await guild.channels.fetch();
+          const categories: Array<{ id: string; name: string; position?: number }> = [];
+          const channels: Array<{
+            id: string;
+            name: string;
+            type: 'text' | 'voice' | string;
+            parentId?: string | null;
+            position?: number;
+          }> = [];
+
+          fetchedChannels.forEach((ch: any) => {
+            if (!ch) return;
+            // Category type: 4 in discord.js
+            if (ch.type === 4 || ch.type === 'GuildCategory' || ch.type === 'GUILD_CATEGORY') {
+              categories.push({
+                id: ch.id,
+                name: ch.name,
+                position: ch.position,
+              });
+            } else {
+              const isVoice = ch.type === 2 || ch.type === 'GuildVoice' || ch.type === 'GUILD_VOICE';
+              channels.push({
+                id: ch.id,
+                name: ch.name,
+                type: isVoice ? 'voice' : 'text',
+                parentId: ch.parentId || null,
+                position: ch.position,
+              });
+            }
+          });
+
+          return {
+            guildId: guild.id,
+            guildName: guild.name,
+            categories,
+            channels,
+          };
+        }
+      } catch (err: any) {
+        logger.log({
+          event: 'Failed fetching live Discord server snapshot, falling back to simulated snapshot',
+          actionType: 'DISCORD_MAP',
+          decision: 'FALLBACK',
+          success: false,
+          aiUsed: false,
+          durationMs: 0,
+          error: err.message,
+        });
+      }
+    }
+
+    // Standalone fallback: return canonical configuration
+    return ServerMapValidator.getCanonicalSnapshot();
   }
 
   // ==========================================
@@ -160,9 +244,20 @@ export class DiscordAdapter implements DiscordActionHandler {
     try {
       const command = new SlashCommandBuilder()
         .setName('foxty')
-        .setDescription('Interage diretamente com o Foxty')
+        .setDescription('Interage diretamente com o Foxty ou executa diagnósticos do Cherry Place')
         .addStringOption((option) =>
-          option.setName('pergunta').setDescription('O que você quer dizer ou perguntar ao Foxty?').setRequired(false)
+          option
+            .setName('acao')
+            .setDescription('Ação administrativa ou modo de operação')
+            .setRequired(false)
+            .addChoices(
+              { name: '🗺️ Diagnóstico do Mapa do Servidor', value: 'diagnostico' },
+              { name: '📊 Status e Vetores do Foxty', value: 'status' },
+              { name: '💬 Conversar', value: 'chat' }
+            )
+        )
+        .addStringOption((option) =>
+          option.setName('pergunta').setDescription('Mensagem ou comando para o Foxty').setRequired(false)
         );
 
       const rest = new REST({ version: '10' }).setToken(config.discordToken);
@@ -178,7 +273,7 @@ export class DiscordAdapter implements DiscordActionHandler {
       }
 
       logger.log({
-        event: 'Slash Command /foxty Registered',
+        event: 'Slash Command /foxty Registered with diagnostic mode',
         actionType: 'DISCORD_COMMANDS',
         decision: 'REGISTERED',
         success: true,
@@ -198,3 +293,4 @@ export class DiscordAdapter implements DiscordActionHandler {
     }
   }
 }
+

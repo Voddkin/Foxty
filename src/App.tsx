@@ -4,6 +4,7 @@ import { PersonalityPanel } from './components/PersonalityPanel.js';
 import { PipelineSimulator } from './components/PipelineSimulator.js';
 import { EventEnginePanel } from './components/EventEnginePanel.js';
 import { SakuraMailBridgePanel } from './components/SakuraMailBridgePanel.js';
+import { ServerMapValidatorPanel } from './components/ServerMapValidatorPanel.js';
 import { MemoryInspector } from './components/MemoryInspector.js';
 import { AuditLogViewer } from './components/AuditLogViewer.js';
 import { ChannelInfo } from './types.js';
@@ -64,6 +65,9 @@ export default function App() {
 
         {/* Personality State Vectors */}
         <PersonalityPanel state={status?.state} />
+
+        {/* Server Map Canonical Topology Validator (New Diagnostic Module) */}
+        <ServerMapValidatorPanel onRefreshTrigger={fetchStatus} />
 
         {/* Two-Column Grid: Pipeline Simulator + Event Engine */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

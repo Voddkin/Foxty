@@ -1,9 +1,17 @@
 import { FoxtyCore } from '../src/core/FoxtyCore.js';
-import { loadConfig, CHERRY_PLACE_CHANNELS } from '../src/config/index.js';
+import {
+  loadConfig,
+  CHERRY_PLACE_CHANNELS,
+  CHERRY_PLACE_CHANNEL_IDS,
+  isSakuraMailChannel,
+} from '../src/config/index.js';
 import { parseBrainOutput } from '../src/brain/contracts.js';
 import { ToolRegistry } from '../src/tools/ToolRegistry.js';
 import { InMemoryStore } from '../src/memory/InMemoryStore.js';
 import { EventEngine } from '../src/events/EventEngine.js';
+import { runServerModelTestSuite } from './test_server_model.js';
+import { runChannelBehaviorPolicyTests } from './test_channel_behavior_policy.js';
+import { runServerMapValidatorTests } from './test_server_map_validator.js';
 
 let passed = 0;
 let failed = 0;
@@ -58,8 +66,8 @@ async function runTestSuite() {
   // 5. Tool Validation & Security
   console.log('\nGroup 5: Tool Registry & Argument Validation');
   const registry = new ToolRegistry();
-  const publicChannel = CHERRY_PLACE_CHANNELS.find((c) => !c.isProtected)!;
-  const protectedMailChannel = CHERRY_PLACE_CHANNELS.find((c) => c.id === 'ch-sakura-mail')!;
+  const publicChannel = CHERRY_PLACE_CHANNELS.find((c) => !c.isProtected && c.foxtyPolicy === 'Uso Ativo')!;
+  const protectedMailChannel = CHERRY_PLACE_CHANNELS.find((c) => isSakuraMailChannel(c.id))!;
 
   const validAction = {
     tool: 'send_message' as const,
@@ -117,7 +125,7 @@ async function runTestSuite() {
   // 8. Event Engine & Cooldowns
   console.log('\nGroup 8: Event Engine & Cooldowns');
   const eventEngine = new EventEngine(30);
-  const testTrigger = eventEngine.triggerTestEvent();
+  const testTrigger = eventEngine.triggerTestEvent(undefined, publicChannel);
   assert(testTrigger.triggered === true, 'Spontaneous test event triggered successfully');
   assert(testTrigger.messages !== undefined && testTrigger.messages.length > 0, 'Event produced quips/messages');
 
@@ -168,7 +176,7 @@ async function runTestSuite() {
 
   // Test Conversation Cycle (Farewell / Closing ritual)
   const cycleObs = analyzer.analyze('Kris', 'boa noite, dorme bem', [
-    { id: '1', author: 'Riely', channelId: 'ch-daily-talk', content: 'até amanhãaaaaaa', timestamp: new Date().toISOString() }
+    { id: '1', author: 'Riely', channelId: CHERRY_PLACE_CHANNEL_IDS.CONVERSAS_DIARIAS, content: 'até amanhãaaaaaa', timestamp: new Date().toISOString() }
   ]);
   assert(cycleObs.conversationCycle !== undefined, 'Closing ritual cycle detected');
   assert(cycleObs.conversationCycle?.cycleType === 'closing_ritual', 'Cycle labeled as closing_ritual');
@@ -239,6 +247,21 @@ async function runTestSuite() {
 
   const crossChannelEvent = registeredEvents.find(e => e.payload?.targetChannelRedirect);
   assert(crossChannelEvent !== undefined, 'Cross-channel event configured');
+
+  // 14. Server Model Canonical Specification Verification
+  await runServerModelTestSuite();
+
+  // 15. Channel Behavior Policy Specification Verification
+  const policyResults = await runChannelBehaviorPolicyTests();
+  if (policyResults.failed > 0) {
+    failed += policyResults.failed;
+  }
+
+  // 16. ServerMapValidator Specification Verification
+  const validatorResults = await runServerMapValidatorTests();
+  if (validatorResults.failed > 0) {
+    failed += validatorResults.failed;
+  }
 
   console.log('\n=============================================');
   console.log(`Results: ${passed} PASSED | ${failed} FAILED`);

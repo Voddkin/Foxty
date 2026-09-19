@@ -15,6 +15,7 @@ export interface DiscordActionHandler {
   sendMessage(channelId: string, content: string): Promise<{ id: string; content: string }>;
   react(channelId: string, messageId: string, emoji: string): Promise<{ success: boolean }>;
   sendMultipleMessages?(channelId: string, messages: string[]): Promise<{ count: number; ids: string[] }>;
+  getServerSnapshot?(guildId?: string): Promise<any>;
 }
 
 export class ToolExecutor {
@@ -23,7 +24,7 @@ export class ToolExecutor {
     private discordHandler?: DiscordActionHandler,
     private memoryStore?: IMemoryStore,
     private eventEngine?: EventEngine,
-    private channelsProvider?: () => ChannelInfo[]
+    private channelsProvider?: () => readonly ChannelInfo[] | ChannelInfo[]
   ) {}
 
   public setDiscordHandler(handler: DiscordActionHandler): void {
@@ -38,7 +39,7 @@ export class ToolExecutor {
     this.eventEngine = engine;
   }
 
-  public setChannelsProvider(provider: () => ChannelInfo[]): void {
+  public setChannelsProvider(provider: () => readonly ChannelInfo[] | ChannelInfo[]): void {
     this.channelsProvider = provider;
   }
 

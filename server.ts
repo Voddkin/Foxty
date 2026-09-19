@@ -137,7 +137,27 @@ async function startServer() {
     res.json(core.getSakuraMailBridge().getRecentAbstractEvents());
   });
 
-  // 6. Memory Endpoints
+  // 7. Server Map Diagnostics (Read-Only & Non-Destructive)
+  app.get('/api/diagnostics/server-map', async (req, res) => {
+    try {
+      const report = await core.validateServerMap();
+      res.json(report);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/diagnostics/server-map', async (req, res) => {
+    try {
+      const snapshot = req.body?.snapshot;
+      const report = await core.validateServerMap(snapshot);
+      res.json(report);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 8. Memory Endpoints
   app.get('/api/memories', async (req, res) => {
     try {
       const query = req.query.q as string | undefined;
