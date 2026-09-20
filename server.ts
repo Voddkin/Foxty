@@ -5,7 +5,7 @@ import { createServer as createViteServer } from 'vite';
 import { loadConfig } from './src/config/index.js';
 import { FoxtyCore } from './src/core/FoxtyCore.js';
 import { DiscordAdapter } from './src/discord/DiscordAdapter.js';
-import { logger } from './src/core/Logger.js';
+import { logger, sanitizeSensitiveData } from './src/core/Logger.js';
 
 // Setup ES module paths
 const __filename = fileURLToPath(import.meta.url);
@@ -46,10 +46,13 @@ async function startServer() {
         testMode: config.testMode,
         deepSeekConfigured: !!config.deepSeekApiKey,
         deepSeekModel: config.deepSeekModel,
+        deepSeekInsufficientBalance: core.getDeepSeekAdapter().isInsufficientBalance(),
         discord: {
           connected: isConnected,
           botUser: botUser ? botUser.tag : null,
           hasToken: !!config.discordToken,
+          clientId: config.discordClientId || null,
+          guildId: config.discordGuildId || null,
         },
         state,
         memoryCount,
@@ -154,6 +157,16 @@ async function startServer() {
       res.json(report);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 7b. Discord Connection & Integration Audit
+  app.get('/api/diagnostics/discord', async (req, res) => {
+    try {
+      const audit = await discordAdapter.auditConnection();
+      res.json(audit);
+    } catch (err: any) {
+      res.status(500).json({ error: sanitizeSensitiveData(err.message) });
     }
   });
 

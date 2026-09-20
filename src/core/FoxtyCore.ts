@@ -474,6 +474,38 @@ export class FoxtyCore {
       };
     }
 
+    // Subcommand: conexao / connection / audit-connection
+    if (
+      subcommand === 'conexao' ||
+      subcommand === 'connection' ||
+      subcommand === 'ping' ||
+      (prompt && (prompt.toLowerCase() === 'conexao' || prompt.toLowerCase() === 'connection'))
+    ) {
+      if (this.discordHandler && typeof (this.discordHandler as any).auditConnection === 'function') {
+        const audit = await (this.discordHandler as any).auditConnection();
+        return {
+          reply: audit.summaryMarkdown,
+          decision: {
+            decision: 'respond',
+            tone: 'pseudo_serious',
+            messages: [audit.summaryMarkdown],
+          },
+          toolResults: [],
+        };
+      } else {
+        const msg = '🦊 **Diagnóstico de Conexão Discord**\n• Status: `STANDALONE / DESCONECTADO`\n• O cliente do Discord não está ativo ou não foi vinculado.';
+        return {
+          reply: msg,
+          decision: {
+            decision: 'respond',
+            tone: 'pseudo_serious',
+            messages: [msg],
+          },
+          toolResults: [],
+        };
+      }
+    }
+
     // Subcommand: diagnostico / mapa / audit
     if (
       subcommand === 'diagnostico' ||

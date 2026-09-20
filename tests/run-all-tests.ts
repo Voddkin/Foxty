@@ -13,6 +13,7 @@ import { runServerModelTestSuite } from './test_server_model.js';
 import { runChannelBehaviorPolicyTests } from './test_channel_behavior_policy.js';
 import { runServerMapValidatorTests } from './test_server_map_validator.js';
 import { runDeepSeekBrainTestSuite } from './deepseek-brain.test.js';
+import { runDiscordIntegrationTestSuite } from './test_discord_integration.js';
 
 let passed = 0;
 let failed = 0;
@@ -275,6 +276,14 @@ async function runTestSuite() {
   const deepSeekResults = await runDeepSeekBrainTestSuite();
   if (deepSeekResults.failed > 0) {
     failed += deepSeekResults.failed;
+  }
+
+  // 18. Discord Integration Audit & Diagnostics Verification
+  const discordResults = await runDiscordIntegrationTestSuite();
+  if (discordResults.failed > 0) {
+    failed += discordResults.failed;
+  } else {
+    passed += discordResults.passed;
   }
 
   console.log('\n=============================================');

@@ -426,3 +426,70 @@ export interface DeepSeekBrainConfig {
   fetchFn?: typeof fetch;
 }
 
+// ----------------------------------------------------------------------------
+// DISCORD CONNECTION AUDIT & INTEGRATION TYPES
+// ----------------------------------------------------------------------------
+export interface DiscordConnectionAudit {
+  timestamp: string;
+  verdict: 'HEALTHY' | 'PARTIAL' | 'DISCONNECTED' | 'ERROR';
+  summary: string;
+  credentials: {
+    hasToken: boolean;
+    tokenConfigured: boolean;
+    tokenLength: number;
+    tokenPreview: string; // e.g. "MTU1...[REDACTED]"
+    clientId: string | null;
+    guildId: string | null;
+    isClientIdCanonical: boolean;
+    isGuildIdCanonical: boolean;
+  };
+  restApi: {
+    status: 'CONNECTED' | 'FAILED' | 'SKIPPED';
+    botUser: {
+      id: string;
+      tag: string;
+      username: string;
+      bot: boolean;
+    } | null;
+    latencyMs?: number;
+    error?: string;
+  };
+  gateway: {
+    status: 'READY' | 'CONNECTING' | 'DISCONNECTED' | 'FAILED';
+    pingMs: number;
+    intents: {
+      guilds: boolean;
+      guildMessages: boolean;
+      messageContent: boolean;
+      guildMessageReactions: boolean;
+      rawIntents: number;
+    };
+    cachedGuilds: number;
+    error?: string;
+  };
+  guildIdentification: {
+    identified: boolean;
+    id: string;
+    name: string | null;
+    isCherryPlace: boolean;
+    memberCount?: number;
+    channelCount?: number;
+    categoriesCount?: number;
+    error?: string;
+  };
+  slashCommandAudit: {
+    registered: boolean;
+    commandId?: string;
+    commandName?: string;
+    description?: string;
+    optionsCount?: number;
+    scope: 'guild' | 'global' | 'none';
+    error?: string;
+  };
+  security: {
+    tokensExposedInLogs: boolean;
+    sanitizationActive: boolean;
+  };
+  summaryMarkdown: string;
+}
+

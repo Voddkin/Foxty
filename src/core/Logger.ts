@@ -1,5 +1,30 @@
 import { AuditLogEntry } from '../types.js';
 
+export function sanitizeSensitiveData(str?: string): string {
+  if (!str) return '';
+  let sanitized = str
+    .replace(/DISCORD_TOKEN=[^\s]+/gi, 'DISCORD_TOKEN=[REDACTED]')
+    .replace(/DEEPSEEK_API_KEY=[^\s]+/gi, 'DEEPSEEK_API_KEY=[REDACTED]')
+    .replace(/Bearer\s+[A-Za-z0-9_\-\.]+/gi, 'Bearer [REDACTED]')
+    .replace(/Bot\s+[A-Za-z0-9_\-\.]+/gi, 'Bot [REDACTED_DISCORD_TOKEN]')
+    .replace(/sk-[A-Za-z0-9]{10,}/gi, 'sk-[REDACTED]')
+    .replace(/[A-Za-z0-9_-]{24,28}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}/g, '[REDACTED_DISCORD_TOKEN]')
+    .replace(/carta:[^\n,]+/gi, 'carta:[CONTEUDO_PRIVADO_REDACTED]')
+    .replace(/letter_content:[^\n,]+/gi, 'letter_content:[CONTEUDO_PRIVADO_REDACTED]');
+
+  const envToken = process.env.DISCORD_TOKEN;
+  if (envToken && envToken.length > 8) {
+    sanitized = sanitized.split(envToken).join('[REDACTED_DISCORD_TOKEN]');
+  }
+
+  const envDeepseek = process.env.DEEPSEEK_API_KEY;
+  if (envDeepseek && envDeepseek.length > 8) {
+    sanitized = sanitized.split(envDeepseek).join('[REDACTED_DEEPSEEK_KEY]');
+  }
+
+  return sanitized;
+}
+
 export class Logger {
   private static instance: Logger;
   private logs: AuditLogEntry[] = [];
@@ -29,7 +54,13 @@ export class Logger {
       this.logs.pop();
     }
 
-    const level = entry.success ? 'INFO' : 'WARN';
+    const isControlledPersonaDecision =
+      fullEntry.decision === 'SILENCE' ||
+      fullEntry.decision === 'FALLBACK' ||
+      fullEntry.decision === 'PERFECT_MATCH' ||
+      fullEntry.decision === 'COMPLIANT_WITH_WARNINGS' ||
+      fullEntry.decision === 'STANDALONE';
+    const level = entry.success || isControlledPersonaDecision ? 'INFO' : 'WARN';
     const tag = `[FOxty:${entry.actionType}]`;
     console.log(`${new Date().toLocaleTimeString()} ${level} ${tag} ${fullEntry.event} - Decision: ${fullEntry.decision}`);
 
@@ -46,13 +77,7 @@ export class Logger {
 
   private sanitize(str?: string): string | undefined {
     if (!str) return undefined;
-    return str
-      .replace(/DISCORD_TOKEN=[^\s]+/gi, 'DISCORD_TOKEN=[REDACTED]')
-      .replace(/DEEPSEEK_API_KEY=[^\s]+/gi, 'DEEPSEEK_API_KEY=[REDACTED]')
-      .replace(/Bearer\s+[A-Za-z0-9_\-\.]+/gi, 'Bearer [REDACTED]')
-      .replace(/sk-[A-Za-z0-9]{10,}/gi, 'sk-[REDACTED]')
-      .replace(/carta:[^\n,]+/gi, 'carta:[CONTEUDO_PRIVADO_REDACTED]')
-      .replace(/letter_content:[^\n,]+/gi, 'letter_content:[CONTEUDO_PRIVADO_REDACTED]');
+    return sanitizeSensitiveData(str);
   }
 }
 

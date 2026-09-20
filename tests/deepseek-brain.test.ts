@@ -184,6 +184,41 @@ async function runTests() {
     assert.strictEqual(resWithFallback.decision.decision, 'respond');
   });
 
+  // 3.5 Erro HTTP 402 (Insufficient Balance) é normalizado para DEEPSEEK_INSUFFICIENT_BALANCE e ativa circuit breaker
+  await test('3.5 DeepSeek HTTP 402 Insufficient Balance is normalized and engages circuit breaker', async () => {
+    let callCount = 0;
+    const mock402Fetch = (async () => {
+      callCount++;
+      return {
+        ok: false,
+        status: 402,
+        text: async () => '{"error":{"message":"Insufficient Balance","type":"unknown_error","param":null,"code":"invalid_request_error"}}',
+      };
+    }) as any;
+
+    const adapter = new DeepSeekAdapter({ apiKey: 'sk-test', allowHeuristicFallback: false });
+    adapter.setFetchImplementation(mock402Fetch);
+
+    assert.strictEqual(adapter.isInsufficientBalance(), false);
+
+    // First call encounters 402
+    const res1 = await adapter.evaluate(dummyCtx);
+    assert.strictEqual(res1.error, 'DEEPSEEK_INSUFFICIENT_BALANCE');
+    assert.strictEqual(res1.decision.decision, 'ignore');
+    assert.strictEqual(callCount, 1);
+    assert.strictEqual(adapter.isInsufficientBalance(), true);
+
+    // Second call engages circuit breaker without making an HTTP request
+    const res2 = await adapter.evaluate(dummyCtx);
+    assert.strictEqual(res2.error, 'DEEPSEEK_INSUFFICIENT_BALANCE');
+    assert.strictEqual(res2.decision.decision, 'ignore');
+    assert.strictEqual(callCount, 1); // No new fetch call made!
+
+    // Reset allows re-attempt
+    adapter.resetBalanceStatus();
+    assert.strictEqual(adapter.isInsufficientBalance(), false);
+  });
+
   console.log('\n--- Output Validation & Schema Tests ---');
 
   // 4. resposta JSON válida é convertida para o tipo interno

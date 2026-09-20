@@ -57,13 +57,21 @@ export const CoreHeader: React.FC<CoreHeaderProps> = ({ status, onRefresh, loadi
           {/* DeepSeek Brain Status */}
           <div
             className={`px-2.5 py-1 rounded-md border flex items-center gap-1.5 ${
-              deepSeekActive
+              status?.deepSeekInsufficientBalance
+                ? 'bg-amber-500/10 text-amber-300 border-amber-500/20'
+                : deepSeekActive
                 ? 'bg-purple-500/10 text-purple-300 border-purple-500/20'
                 : 'bg-blue-500/10 text-blue-300 border-blue-500/20'
             }`}
           >
             <Cpu className="w-3.5 h-3.5" />
-            <span>{deepSeekActive ? `DeepSeek: ${status?.deepSeekModel}` : 'Brain: Heuristic Mock'}</span>
+            <span>
+              {status?.deepSeekInsufficientBalance
+                ? 'DeepSeek: Sem Saldo (Standby Seguro)'
+                : deepSeekActive
+                ? `DeepSeek: ${status?.deepSeekModel}`
+                : 'Brain: Heuristic Mock'}
+            </span>
           </div>
 
           {/* Refresh Button */}

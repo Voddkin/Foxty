@@ -22,6 +22,9 @@ export class DeepSeekAdapter {
     reasoningEffort?: ReasoningEffort;
   };
   private fetchImpl: typeof fetch;
+  private insufficientBalanceDetected: boolean = false;
+  private lastInsufficientBalanceTimestamp: number = 0;
+  private readonly insufficientBalanceCooldownMs: number = 60000;
 
   constructor(config: DeepSeekConfig) {
     this.config = {
@@ -44,6 +47,20 @@ export class DeepSeekAdapter {
 
   public getConfig(): Readonly<DeepSeekConfig> {
     return { ...this.config };
+  }
+
+  public isInsufficientBalance(): boolean {
+    if (!this.insufficientBalanceDetected) return false;
+    if (Date.now() - this.lastInsufficientBalanceTimestamp > this.insufficientBalanceCooldownMs) {
+      this.insufficientBalanceDetected = false;
+      return false;
+    }
+    return true;
+  }
+
+  public resetBalanceStatus(): void {
+    this.insufficientBalanceDetected = false;
+    this.lastInsufficientBalanceTimestamp = 0;
   }
 
   public async evaluate(
@@ -121,6 +138,51 @@ export class DeepSeekAdapter {
       };
     }
 
+    // 2b. Circuit Breaker for Insufficient Balance (Standby Mode)
+    if (this.isInsufficientBalance()) {
+      const errorCode = 'DEEPSEEK_INSUFFICIENT_BALANCE';
+      if (this.config.allowHeuristicFallback) {
+        const decision = this.heuristicEvaluation(context, promptInstruction);
+        logger.log({
+          event: `DeepSeek Brain Standby (${errorCode} - Heuristic Fallback Active)`,
+          channelId: context.channel.id,
+          actionType: 'BRAIN_EVALUATION',
+          decision: decision.decision,
+          success: true,
+          aiUsed: false,
+          durationMs: Date.now() - startTime,
+          error: errorCode,
+          details: `Tone: ${decision.tone}, Messages: ${decision.messages.length}`,
+        });
+        return { decision, aiUsed: false, tokensUsed: 0, error: errorCode };
+      }
+
+      logger.log({
+        event: `DeepSeek Brain Standby (Inaction Enforced: ${errorCode})`,
+        channelId: context.channel.id,
+        actionType: 'BRAIN_EVALUATION',
+        decision: 'SILENCE',
+        success: false,
+        aiUsed: false,
+        durationMs: Date.now() - startTime,
+        error: errorCode,
+        details: 'DeepSeek account balance is exhausted (HTTP 402). Inaction enforced without wasteful retries.',
+      });
+
+      return {
+        decision: {
+          decision: 'ignore',
+          action: 'ignore',
+          tone: 'neutral',
+          messages: [],
+          reasoning: 'DeepSeek account balance exhausted (HTTP 402). Contextual action safely skipped.',
+        },
+        aiUsed: false,
+        tokensUsed: 0,
+        error: errorCode,
+      };
+    }
+
     // Safe Observability: Log request initiation without sensitive payload dumping
     logger.log({
       event: 'DeepSeek Request Started',
@@ -166,14 +228,19 @@ export class DeepSeekAdapter {
 
       // 4. Handle HTTP Status Codes and Rate Limits
       if (!response.ok) {
-        const errorBody = await response.text().catch(() => '');
+        if (response.status === 402) {
+          throw new Error('DEEPSEEK_INSUFFICIENT_BALANCE');
+        }
         if (response.status === 429) {
-          throw new Error(`DEEPSEEK_RATE_LIMIT: DeepSeek rate limit reached (HTTP 429)`);
+          throw new Error('DEEPSEEK_RATE_LIMIT');
+        }
+        if (response.status === 401) {
+          throw new Error('DEEPSEEK_UNAUTHORIZED');
         }
         if (response.status >= 500) {
-          throw new Error(`DEEPSEEK_SERVER_ERROR_${response.status}: Server error (${response.status}) ${errorBody.slice(0, 100)}`);
+          throw new Error(`DEEPSEEK_SERVER_ERROR_${response.status}`);
         }
-        throw new Error(`DEEPSEEK_HTTP_ERROR_${response.status}: Client error (${response.status}) ${errorBody.slice(0, 100)}`);
+        throw new Error(`DEEPSEEK_HTTP_ERROR_${response.status}`);
       }
 
       const data: any = await response.json();
@@ -252,7 +319,25 @@ export class DeepSeekAdapter {
       };
     } catch (err: any) {
       const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError' || err.message?.toLowerCase().includes('timeout');
-      const errorCode = isTimeout ? 'DEEPSEEK_TIMEOUT' : err.message || 'DEEPSEEK_UNEXPECTED_ERROR';
+      const isInsufficientBalance =
+        err.message?.includes('402') ||
+        err.message?.toLowerCase().includes('insufficient balance') ||
+        err.message?.includes('DEEPSEEK_INSUFFICIENT_BALANCE');
+      const isRateLimit = err.message?.includes('429') || err.message?.includes('RATE_LIMIT');
+      const isUnauthorized = err.message?.includes('401') || err.message?.includes('UNAUTHORIZED');
+
+      let errorCode = err.message || 'DEEPSEEK_UNEXPECTED_ERROR';
+      if (isTimeout) {
+        errorCode = 'DEEPSEEK_TIMEOUT';
+      } else if (isInsufficientBalance) {
+        errorCode = 'DEEPSEEK_INSUFFICIENT_BALANCE';
+        this.insufficientBalanceDetected = true;
+        this.lastInsufficientBalanceTimestamp = Date.now();
+      } else if (isRateLimit) {
+        errorCode = 'DEEPSEEK_RATE_LIMIT';
+      } else if (isUnauthorized) {
+        errorCode = 'DEEPSEEK_UNAUTHORIZED';
+      }
       const durationMs = Date.now() - startTime;
 
       if (this.config.allowHeuristicFallback) {
