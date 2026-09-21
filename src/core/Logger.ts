@@ -8,7 +8,7 @@ export function sanitizeSensitiveData(str?: string): string {
     .replace(/Bearer\s+[A-Za-z0-9_\-\.]+/gi, 'Bearer [REDACTED]')
     .replace(/Bot\s+[A-Za-z0-9_\-\.]+/gi, 'Bot [REDACTED_DISCORD_TOKEN]')
     .replace(/sk-[A-Za-z0-9]{10,}/gi, 'sk-[REDACTED]')
-    .replace(/[A-Za-z0-9_-]{24,28}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}/g, '[REDACTED_DISCORD_TOKEN]')
+    .replace(/[A-Za-z0-9_\-]{20,38}\.[A-Za-z0-9_\-]{4,10}\.[A-Za-z0-9_\-]{10,45}/g, '[REDACTED_DISCORD_TOKEN]')
     .replace(/carta:[^\n,]+/gi, 'carta:[CONTEUDO_PRIVADO_REDACTED]')
     .replace(/letter_content:[^\n,]+/gi, 'letter_content:[CONTEUDO_PRIVADO_REDACTED]');
 
@@ -69,6 +69,42 @@ export class Logger {
     console.log(`${new Date().toLocaleTimeString()} ${level} ${tag} ${fullEntry.event} - Decision: ${fullEntry.decision}`);
 
     return fullEntry;
+  }
+
+  public info(actionType: string, event: string, details?: string): AuditLogEntry {
+    return this.log({
+      actionType,
+      event,
+      decision: 'INFO',
+      success: true,
+      aiUsed: false,
+      durationMs: 0,
+      details,
+    });
+  }
+
+  public warn(actionType: string, event: string, details?: string): AuditLogEntry {
+    return this.log({
+      actionType,
+      event,
+      decision: 'WARN',
+      success: false,
+      aiUsed: false,
+      durationMs: 0,
+      details,
+    });
+  }
+
+  public error(actionType: string, event: string, error?: string): AuditLogEntry {
+    return this.log({
+      actionType,
+      event,
+      decision: 'CONTROLLED_ERROR',
+      success: false,
+      aiUsed: false,
+      durationMs: 0,
+      error,
+    });
   }
 
   public getRecentLogs(limit = 50): AuditLogEntry[] {

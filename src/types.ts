@@ -83,9 +83,46 @@ export interface MemoryItem {
   targetUser?: 'Kris' | 'Riely' | 'Other';
   createdAt: string;
   lastConfirmed?: string;
+  expiresAt?: string;      // ISO string for temporary/expirable retention
   safeForTeasing: boolean; // Privacy constraint: never tease with private context
   retention: 'permanent' | 'temporary' | 'session';
   tags: string[];
+  scope?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface MigrationReport {
+  totalRead: number;
+  migratedCount: number;
+  skippedCount: number;
+  duplicateCount: number;
+  privacyFilteredCount: number;
+  errors: string[];
+  timestamp: string;
+  durationMs: number;
+  sourceProvider: string;
+  targetProvider: string;
+}
+
+export interface ContextualScoredMemory {
+  memory: MemoryItem;
+  score: number;
+  breakdown: {
+    textMatchScore: number;
+    recencyScore: number;
+    importanceScore: number;
+    targetUserBonus: number;
+    tagBonus: number;
+    semanticScore?: number;
+  };
+  scoreBreakdown?: {
+    textMatchScore: number;
+    recencyScore: number;
+    importanceScore: number;
+    targetUserBonus: number;
+    tagBonus?: number;
+    semanticScore?: number;
+  };
 }
 
 export interface PatternDeviation {
@@ -121,6 +158,13 @@ export interface ChatMessage {
   content: string;
   timestamp: string;
   isBot: boolean;
+  replyToMessageId?: string;
+  repliedMessage?: {
+    id?: string;
+    author: string;
+    content: string;
+    timestamp?: string;
+  } | null;
 }
 
 export type ToneType =
@@ -137,17 +181,26 @@ export type ToneType =
 
 export type ToolName =
   | 'send_message'
-  | 'react'
   | 'send_multiple_messages'
-  | 'save_memory'
-  | 'search_memory'
+  | 'reply_to_message'
+  | 'react_to_message'
+  | 'react'
+  | 'get_message'
+  | 'search_messages'
+  | 'get_recent_messages'
+  | 'edit_message'
+  | 'delete_message'
+  | 'send_file'
   | 'get_channel_info'
   | 'get_server_info'
+  | 'save_memory'
+  | 'search_memory'
   | 'trigger_event';
 
 export interface ActionRequest {
   tool: ToolName;
   arguments: Record<string, any>;
+  callId?: string;
 }
 
 export interface MemoryCandidate {
@@ -185,11 +238,15 @@ export interface CurrentLocationContext {
 
 export interface CurrentEventContext {
   eventType: 'chat_message' | 'direct_mention' | 'slash_command' | 'scheduled_tick' | 'reaction_event' | 'custom';
+  messageId: string;
   author: { name: string; isBot: boolean };
   content: string;
-  repliedMessage?: { author: string; content: string } | null;
+  timestamp: string;
+  replyToMessageId?: string;
+  repliedMessage?: { id?: string; author: string; content: string; timestamp?: string } | null;
   mentions: { directMentionOfFoxty: boolean; otherMentions: string[] };
-  recentConversationWindow: Array<{ author: string; content: string; timestamp: string }>;
+  immediateConversationWindow: ChatMessage[];
+  recentConversationWindow: Array<{ id?: string; author: string; content: string; timestamp: string; replyToMessageId?: string }>;
 }
 
 export interface MemoryAndStateContext {
@@ -410,6 +467,16 @@ export interface ServerMapValidationReport {
 // ----------------------------------------------------------------------------
 // DEEPSEEK BRAIN CONFIGURATION TYPES
 // ----------------------------------------------------------------------------
+export type CircuitBreakerState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+
+export interface CircuitBreakerStatus {
+  state: CircuitBreakerState;
+  failureCount: number;
+  reason?: string;
+  cooldownRemainingMs: number;
+  lastFailureTime?: number;
+}
+
 export type ThinkingMode = 'none' | 'enabled' | 'auto';
 export type ReasoningEffort = 'low' | 'medium' | 'high';
 
@@ -492,6 +559,47 @@ export interface DiscordConnectionAudit {
     tokensExposedInLogs: boolean;
     sanitizationActive: boolean;
   };
+  summaryMarkdown: string;
+}
+
+// ----------------------------------------------------------------------------
+// RUNTIME KNOWLEDGE & CONSTITUTION TYPES (11 CANONICAL DOCUMENTS)
+// ----------------------------------------------------------------------------
+export type CanonicalDocumentCategory =
+  | 'BEHAVIOR_AND_IDENTITY'
+  | 'ARCHITECTURE_AND_INFRASTRUCTURE';
+
+export interface CanonicalDocumentMetadata {
+  id: string;
+  filename: string;
+  title: string;
+  category: CanonicalDocumentCategory;
+  description: string;
+}
+
+export interface CanonicalDocumentInfo extends CanonicalDocumentMetadata {
+  sizeBytes: number;
+  charCount: number;
+  hash: string;
+  status: 'loaded' | 'missing' | 'empty';
+  loadedAt?: string;
+  preview?: string;
+}
+
+export interface RuntimeKnowledgeStatus {
+  isComplete: boolean;
+  loadedCount: number;
+  totalExpected: number;
+  constitutionHash: string;
+  loadedAt: string;
+  documents: CanonicalDocumentInfo[];
+  missingDocuments: string[];
+  emptyDocuments: string[];
+  totalSizeBytes: number;
+  totalCharCount: number;
+  estimatedTokens: number;
+  constitutionInjected: boolean;
+  promptPrefixSize: number;
   summaryMarkdown: string;
 }
 

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Shield, Radio, Cpu, Activity } from 'lucide-react';
+import { Shield, Radio, Cpu, Activity, BookOpen } from 'lucide-react';
 
 interface CoreHeaderProps {
   status: any;
@@ -11,6 +11,7 @@ export const CoreHeader: React.FC<CoreHeaderProps> = ({ status, onRefresh, loadi
   const isDiscordConnected = status?.discord?.connected;
   const hasDiscordToken = status?.discord?.hasToken;
   const deepSeekActive = status?.deepSeekConfigured;
+  const knowledge = status?.knowledge;
 
   return (
     <header className="border-b border-zinc-800 bg-zinc-900/60 backdrop-blur-md px-6 py-4">
@@ -34,6 +35,20 @@ export const CoreHeader: React.FC<CoreHeaderProps> = ({ status, onRefresh, loadi
 
         {/* Status Indicators */}
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+          {/* Knowledge Constitution Status */}
+          <div
+            className={`px-2.5 py-1 rounded-md border flex items-center gap-1.5 ${
+              knowledge?.isComplete
+                ? 'bg-purple-500/10 text-purple-300 border-purple-500/20'
+                : 'bg-amber-500/10 text-amber-300 border-amber-500/20'
+            }`}
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            <span>
+              Docs: {knowledge ? `${knowledge.loadedCount}/${knowledge.totalExpected} Canônicos` : '11/11'}
+            </span>
+          </div>
+
           {/* Discord Status */}
           <div
             className={`px-2.5 py-1 rounded-md border flex items-center gap-1.5 ${

@@ -49,16 +49,18 @@ export class ServerMapValidator {
    *
    * @param actual Actual Discord server snapshot or live data
    */
-  public validate(actual: DiscordServerSnapshot): ServerMapValidationReport {
+  public validate(actual?: DiscordServerSnapshot): ServerMapValidationReport {
+    const targetActual = actual || ServerMapValidator.getCanonicalSnapshot();
+    actual = targetActual;
     const timestamp = new Date().toISOString();
     const findings: ValidationFinding[] = [];
 
     // 1. Guild Validation
-    const isGuildIdMatch = actual.guildId === CHERRY_PLACE_SERVER.id;
+    const isGuildIdMatch = targetActual.guildId === CHERRY_PLACE_SERVER.id;
     const isGuildNameMatch =
-      actual.guildName.toLowerCase().includes('cherry place') ||
-      actual.guildName === CHERRY_PLACE_SERVER.name ||
-      actual.guildName === CHERRY_PLACE_SERVER.decoratedName;
+      targetActual.guildName.toLowerCase().includes('cherry place') ||
+      targetActual.guildName === CHERRY_PLACE_SERVER.name ||
+      targetActual.guildName === CHERRY_PLACE_SERVER.decoratedName;
 
     const guildFindings: ValidationFinding[] = [];
     if (!isGuildIdMatch) {
@@ -66,11 +68,11 @@ export class ServerMapValidator {
         code: 'GUILD_ID_MISMATCH',
         severity: 'ERROR',
         targetType: 'guild',
-        targetId: actual.guildId,
-        targetName: actual.guildName,
+        targetId: targetActual.guildId,
+        targetName: targetActual.guildName,
         expected: CHERRY_PLACE_SERVER.id,
-        actual: actual.guildId,
-        message: `Guild ID '${actual.guildId}' não corresponde ao ID canônico de Cherry Place ('${CHERRY_PLACE_SERVER.id}').`,
+        actual: targetActual.guildId,
+        message: `Guild ID '${targetActual.guildId}' não corresponde ao ID canônico de Cherry Place ('${CHERRY_PLACE_SERVER.id}').`,
       };
       guildFindings.push(f);
       findings.push(f);

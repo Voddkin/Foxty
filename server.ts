@@ -5,6 +5,10 @@ import { loadConfig } from './src/config/index.js';
 import { FoxtyCore } from './src/core/FoxtyCore.js';
 import { DiscordAdapter } from './src/discord/DiscordAdapter.js';
 import { logger, sanitizeSensitiveData } from './src/core/Logger.js';
+import { MigrationTool } from './src/memory/MigrationTool.js';
+import { PersistentMemoryStore } from './src/memory/PersistentMemoryStore.js';
+import { FirestoreMemoryStore } from './src/memory/FirestoreMemoryStore.js';
+import { ContextualRetriever } from './src/memory/ContextualRetriever.js';
 
 async function startServer() {
   const app = express();
@@ -121,6 +125,62 @@ async function startServer() {
         state,
         memoryCount,
         channelsCount: config.channels.length,
+        knowledge: core.getRuntimeKnowledgeStatus(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 1b. Runtime Knowledge & Constitution Diagnostics
+  app.get('/api/diagnostics/knowledge', (req, res) => {
+    try {
+      const status = core.getRuntimeKnowledgeStatus();
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/diagnostics/knowledge/reload', (req, res) => {
+    try {
+      const status = core.reloadRuntimeKnowledge();
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/diagnostics/knowledge/documents/:id', (req, res) => {
+    try {
+      const loader = core.getDeepSeekAdapter().getRuntimeKnowledgeLoader();
+      const docInfo = loader.getDocumentInfo(req.params.id);
+      const content = loader.getDocumentContent(req.params.id);
+
+      if (!docInfo) {
+        return res.status(404).json({ error: `Document ${req.params.id} not found` });
+      }
+
+      res.json({
+        ...docInfo,
+        content: content || '',
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/diagnostics/constitution', (req, res) => {
+    try {
+      const status = core.getRuntimeKnowledgeStatus();
+      const promptPrefix = core.getDeepSeekAdapter().buildSystemPrompt();
+      const summaryText = core.getInjectedConstitutionSummary();
+
+      res.json({
+        status,
+        promptPrefix,
+        summaryText,
+        summaryMarkdown: status.summaryMarkdown,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -234,13 +294,24 @@ async function startServer() {
     }
   });
 
-  // 8. Memory Endpoints
+  // 8. Memory Persistence Endpoints
   app.get('/api/memories', async (req, res) => {
     try {
       const query = req.query.q as string | undefined;
       const safeOnly = req.query.safeOnly === 'true';
+      const type = req.query.type as any;
+      const targetUser = req.query.targetUser as any;
+      const minImportance = req.query.minImportance ? parseFloat(req.query.minImportance as string) : undefined;
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
+      const tags = req.query.tags ? (req.query.tags as string).split(',').map((t) => t.trim()) : undefined;
+
       const items = await core.getMemoryStore().search(query, {
+        type,
+        targetUser,
         safeForTeasingOnly: safeOnly,
+        minImportance,
+        tags,
+        limit,
       });
       res.json(items);
     } catch (err: any) {
@@ -250,7 +321,7 @@ async function startServer() {
 
   app.post('/api/memories', async (req, res) => {
     try {
-      const { content, type, importance, confidence, safeForTeasing, targetUser, tags } = req.body;
+      const { content, type, importance, confidence, safeForTeasing, targetUser, tags, expiresAt, scope, metadata } = req.body;
       if (!content) {
         return res.status(400).json({ error: 'content is required' });
       }
@@ -263,8 +334,11 @@ async function startServer() {
         source: 'dashboard-operator',
         safeForTeasing: !!safeForTeasing,
         targetUser,
-        retention: 'permanent',
+        expiresAt,
+        retention: expiresAt ? 'temporary' : 'permanent',
         tags: Array.isArray(tags) ? tags : ['manual'],
+        scope: scope || 'cherry_place',
+        metadata: metadata || {},
       });
 
       res.status(201).json(item);
@@ -279,6 +353,64 @@ async function startServer() {
       res.json({ success: deleted });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Contextual Retrieval API
+  app.post('/api/memory/retrieve', async (req, res) => {
+    try {
+      const { queryText, currentSpeaker, targetUser, channelId, safeForTeasingRequired, limit, activeTopics } = req.body;
+      const retriever = new ContextualRetriever();
+      const scoredMemories = await retriever.retrieve(core.getMemoryStore(), {
+        queryText,
+        currentSpeaker,
+        targetUser,
+        channelId,
+        safeForTeasingRequired: !!safeForTeasingRequired,
+        activeTopics,
+        limit: limit ? parseInt(limit, 10) : 10,
+      });
+      res.json(scoredMemories);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Expire temporary memories
+  app.post('/api/memory/expire', async (req, res) => {
+    try {
+      const expiredCount = await core.getMemoryStore().expire();
+      res.json({ success: true, expiredCount });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Clear all memories
+  app.post('/api/memory/clear', async (req, res) => {
+    try {
+      await core.getMemoryStore().clear();
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // SQLite -> Firestore Migration Endpoint
+  app.post('/api/memory/migrate/sqlite-to-firestore', async (req, res) => {
+    try {
+      const sqliteStore = new PersistentMemoryStore();
+      const firestoreStore = new FirestoreMemoryStore();
+      const migration = new MigrationTool();
+
+      const report = await migration.migrate(sqliteStore, firestoreStore, {
+        overwrite: !!req.body?.overwrite,
+        filterSakuraMail: req.body?.filterSakuraMail !== false,
+      });
+
+      res.json(report);
+    } catch (err: any) {
+      res.status(500).json({ error: sanitizeSensitiveData(err.message) });
     }
   });
 

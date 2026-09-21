@@ -176,6 +176,12 @@ export class EventEngine {
     return true;
   }
 
+  public triggerEvent(eventId: string, channelId?: string): FoxtyEvent | null {
+    const targetChannel = channelId ? CHERRY_PLACE_CHANNELS.find((c) => c.id === channelId) : undefined;
+    const res = this.triggerTestEvent(eventId, targetChannel);
+    return res.triggered && res.event ? res.event : null;
+  }
+
   public triggerTestEvent(eventId?: string, targetChannel?: ChannelInfo): {
     triggered: boolean;
     event?: FoxtyEvent;

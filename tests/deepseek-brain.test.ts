@@ -38,12 +38,12 @@ console.log('======================================================\n');
 async function runTests() {
   console.log('--- Configuration & Initialization Tests ---');
 
-  // 1. DeepSeekAdapter usa deepseek-flash por default
-  await test('1. DeepSeekAdapter uses deepseek-flash by default', () => {
+  // 1. DeepSeekAdapter usa deepseek-chat por default
+  await test('1. DeepSeekAdapter uses deepseek-chat by default', () => {
     const adapter = new DeepSeekAdapter({
       baseUrl: 'https://api.deepseek.com',
     });
-    assert.strictEqual(adapter.getConfig().model, 'deepseek-flash');
+    assert.strictEqual(adapter.getConfig().model, 'deepseek-chat');
   });
 
   // 2. API key vem da configuração
@@ -52,13 +52,13 @@ async function runTests() {
     const adapter = new DeepSeekAdapter({
       apiKey: customKey,
       baseUrl: 'https://api.deepseek.com',
-      model: 'deepseek-flash',
+      model: 'deepseek-chat',
     });
     assert.strictEqual(adapter.getConfig().apiKey, customKey);
 
     const config = loadConfig();
     assert.ok(typeof config.deepSeek === 'object');
-    assert.strictEqual(config.deepSeek.model, 'deepseek-flash');
+    assert.strictEqual(config.deepSeek.model, 'deepseek-chat');
   });
 
   // 3. base URL é configurável
@@ -67,7 +67,7 @@ async function runTests() {
     const adapter = new DeepSeekAdapter({
       apiKey: 'test-key',
       baseUrl: customBaseUrl,
-      model: 'deepseek-flash',
+      model: 'deepseek-chat',
     });
     assert.strictEqual(adapter.getConfig().baseUrl, customBaseUrl);
   });

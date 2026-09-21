@@ -77,7 +77,7 @@ export interface FoxtyConfig {
 export function loadConfig(): FoxtyConfig {
   const apiKey = process.env.DEEPSEEK_API_KEY || undefined;
   const baseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
-  const model = process.env.DEEPSEEK_MODEL || 'deepseek-flash';
+  const model = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
   const temperature = parseFloat(process.env.DEEPSEEK_TEMPERATURE || '0.7');
   const maxTokens = parseInt(process.env.DEEPSEEK_MAX_TOKENS || '600', 10);
   const timeoutMs = parseInt(process.env.DEEPSEEK_TIMEOUT_MS || '15000', 10);

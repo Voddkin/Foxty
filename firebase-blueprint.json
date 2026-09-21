@@ -1,0 +1,39 @@
+{
+  "entities": {
+    "MemoryItem": {
+      "title": "MemoryItem",
+      "description": "Foxty persistent episodic, behavioral, server and project memories",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique identifier of the memory item" },
+        "content": { "type": "string", "description": "Textual content of the memory" },
+        "type": {
+          "type": "string",
+          "enum": ["episodic", "behavioral", "server", "project", "temporary"],
+          "description": "Category of the memory"
+        },
+        "importance": { "type": "number", "description": "Priority weight from 0.0 to 1.0" },
+        "confidence": { "type": "number", "description": "Confidence score from 0.0 to 1.0" },
+        "safeForTeasing": { "type": "boolean", "description": "Flag indicating if safe for humorous teasing" },
+        "targetUser": {
+          "type": "string",
+          "enum": ["Kris", "Riely", "Other"],
+          "description": "Associated user if any"
+        },
+        "createdAt": { "type": "string", "format": "date-time", "description": "ISO timestamp of creation" },
+        "expiresAt": { "type": "string", "format": "date-time", "description": "ISO timestamp of expiration" },
+        "tags": { "type": "array", "description": "Keywords and indexing tags" },
+        "source": { "type": "string", "description": "Origin of the memory" },
+        "scope": { "type": "string", "description": "Channel or server scope" },
+        "metadata": { "type": "object", "description": "Arbitrary key-value metadata" }
+      },
+      "required": ["id", "content", "type", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/foxty_memories/{memoryId}": {
+      "schema": "MemoryItem",
+      "description": "Stores Foxty persistent memories securely on the server"
+    }
+  }
+}

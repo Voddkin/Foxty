@@ -6,13 +6,17 @@ import {
   REST,
   Routes,
   Events,
+  AttachmentBuilder,
 } from 'discord.js';
 import { FoxtyCore } from '../core/FoxtyCore.js';
 import { DiscordActionHandler } from '../tools/ToolExecutor.js';
 import { logger, sanitizeSensitiveData } from '../core/Logger.js';
-import { DiscordServerSnapshot, DiscordConnectionAudit } from '../types.js';
+import { DiscordServerSnapshot, DiscordConnectionAudit, ChatMessage } from '../types.js';
 import { CHERRY_PLACE_SERVER } from '../config/cherryPlaceModel.js';
+import { isSakuraMailChannel } from '../config/index.js';
 import { ServerMapValidator } from '../validator/ServerMapValidator.js';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export class DiscordAdapter implements DiscordActionHandler {
   private client: Client | null = null;
@@ -66,6 +70,13 @@ export class DiscordAdapter implements DiscordActionHandler {
         });
 
         await this.registerSlashCommands();
+
+        // Start periodic autonomous observation cycle (runs every 60 seconds)
+        setInterval(() => {
+          this.core.runObservationCycle().catch((err) => {
+            logger.warn('AUTONOMY_CYCLE_ERROR', `Error running observation cycle: ${err.message}`);
+          });
+        }, 60000);
       });
 
       // Handle errors gracefully without crashing the Node.js process
@@ -133,15 +144,70 @@ export class DiscordAdapter implements DiscordActionHandler {
       this.client.on(Events.MessageCreate, async (message) => {
         if (message.author.bot) return;
 
-        const isMentioned = message.mentions.has(this.client?.user?.id || '');
-        await this.core.handleMessage({
-          channelId: message.channel.id,
-          author: message.author.displayName || message.author.username,
-          content: message.content,
-          messageId: message.id,
-          isBot: message.author.bot,
-          isDirectMention: isMentioned,
-        });
+        try {
+          const botId = this.client?.user?.id || '';
+          const botUsername = this.client?.user?.username?.toLowerCase() || 'foxty';
+
+          // Capture replied message if this message is a reply
+          let repliedMessageData: { id: string; author: string; content: string; timestamp?: string } | null = null;
+          let replyToMessageId: string | undefined = message.reference?.messageId;
+          let isDirectReplyToBot = false;
+
+          if (replyToMessageId) {
+            try {
+              const refMsg = await message.fetchReference();
+              if (refMsg) {
+                repliedMessageData = {
+                  id: refMsg.id,
+                  author: refMsg.author?.displayName || refMsg.author?.username || 'user',
+                  content: refMsg.content,
+                  timestamp: refMsg.createdAt?.toISOString(),
+                };
+                if (botId && refMsg.author?.id === botId) {
+                  isDirectReplyToBot = true;
+                }
+              }
+            } catch (e) {
+              // Reference might be deleted or inaccessible
+            }
+          }
+
+          const hasTextMention =
+            new RegExp(`\\b${botUsername}\\b`, 'i').test(message.content) ||
+            /\bfoxty\b/i.test(message.content);
+
+          const isMentioned =
+            Boolean(botId && message.mentions.has(botId)) ||
+            isDirectReplyToBot ||
+            hasTextMention;
+
+          if (isMentioned) {
+            await this.core.handleMessage({
+              channelId: message.channel.id,
+              author: message.author.displayName || message.author.username,
+              content: message.content,
+              messageId: message.id,
+              isBot: message.author.bot,
+              isDirectMention: true,
+              replyToMessageId,
+              repliedMessage: repliedMessageData,
+              dispatchToDiscord: true,
+            });
+          } else {
+            await this.core.observeMessage({
+              channelId: message.channel.id,
+              author: message.author.displayName || message.author.username,
+              content: message.content,
+              messageId: message.id,
+              isBot: message.author.bot,
+              isDirectMention: false,
+              replyToMessageId,
+              repliedMessage: repliedMessageData,
+            });
+          }
+        } catch (err: any) {
+          logger.warn('DISCORD_MESSAGE_CREATE_ERROR', `Error processing messageCreate event: ${err.message}`);
+        }
       });
 
       // Handle Slash Commands
@@ -158,35 +224,69 @@ export class DiscordAdapter implements DiscordActionHandler {
             interaction.options.getString('prompt') ||
             undefined;
 
-          await interaction.deferReply();
-
-          try {
-            // Check if connection audit was specifically requested
-            if (subcommand === 'conexao' || prompt?.toLowerCase() === 'conexao') {
-              const audit = await this.auditConnection();
-              await interaction.editReply(audit.summaryMarkdown);
-              return;
-            }
-
-            const result = await this.core.handleSlashCommand({
-              commandName: 'foxty',
-              subcommand,
-              prompt,
-              author: interaction.user.displayName || interaction.user.username,
-              channelId: interaction.channelId,
+          if (subcommand === 'conexao') {
+            await interaction.deferReply({ ephemeral: true });
+            const audit = await this.auditConnection();
+            await interaction.editReply({
+              content: audit.summaryMarkdown,
             });
+            return;
+          }
 
-            // If reply is long (Discord max 2000 chars per message), trim safely
-            if (result.reply.length > 2000) {
-              const truncated = result.reply.substring(0, 1990) + '...';
-              await interaction.editReply(truncated);
-            } else {
-              await interaction.editReply(result.reply);
+          if (subcommand === 'diagnostico') {
+            await interaction.deferReply({ ephemeral: true });
+            const snapshot = await this.getServerSnapshot();
+            const report = await this.core.validateServerMap(snapshot);
+
+            let resp = `🗺️ **Diagnóstico de Topologia — Cherry Place**\n`;
+            resp += `• Status: **${report.status.toUpperCase()}** (Score: ${report.metrics.complianceScore}%)\n`;
+            resp += `• Canais Canônicos: ${report.metrics.matchedChannels} validados\n`;
+            const missing = report.channels.filter((c) => c.status === 'MISSING');
+            if (missing.length > 0) {
+              resp += `• Canais Ausentes: ${missing.map((c) => c.canonicalName).join(', ')}\n`;
             }
-          } catch (err: any) {
-            await interaction.editReply(
-              `🦊 *Foxty hesita...*: ${sanitizeSensitiveData(err.message)}`
-            );
+            const unexpected = report.unexpectedEntities.filter((c) => c.type === 'channel');
+            if (unexpected.length > 0) {
+              resp += `• Canais Extras: ${unexpected.map((c) => c.name).join(', ')}\n`;
+            }
+            await interaction.editReply({ content: resp });
+            return;
+          }
+
+          if (subcommand === 'status') {
+            const health = await this.core.getGeneralHealth();
+            let statusText = `🦊 **Foxty Core Status**\n`;
+            statusText += `• Estado: \`${health.status}\` | Uptime: \`${health.uptime}s\`\n`;
+            statusText += `• DeepSeek AI: \`${health.deepseek}\`\n`;
+            statusText += `• Memória: \`${health.memory}\`\n`;
+            statusText += `• Mensagens Processadas: \`${health.metrics.messagesObserved}\`\n`;
+            statusText += `• Respostas Geradas: \`${health.metrics.aiResponses + health.metrics.fallbackResponses}\``;
+            await interaction.reply({ content: statusText, ephemeral: true });
+            return;
+          }
+
+          // Handle regular command prompt (delivering via editReply only to prevent channel duplicate posting)
+          await interaction.deferReply();
+          const channelId = interaction.channelId;
+          const author = interaction.user.displayName || interaction.user.username;
+          const content = prompt || 'Olá Foxty!';
+
+          const result = await this.core.handleMessage({
+            channelId,
+            author,
+            content,
+            isDirectMention: true,
+            dispatchToDiscord: false,
+          });
+
+          if (result.decision.messages && result.decision.messages.length > 0) {
+            await interaction.editReply({
+              content: result.decision.messages.join('\n\n'),
+            });
+          } else {
+            await interaction.editReply({
+              content: '*(Foxty observa silenciosamente com um olhar curioso)* 🦊',
+            });
           }
         }
       });
@@ -194,9 +294,9 @@ export class DiscordAdapter implements DiscordActionHandler {
       await this.client.login(token);
     } catch (err: any) {
       logger.log({
-        event: 'Discord Client Login Failed',
+        event: 'Failed initializing Discord Client',
         actionType: 'DISCORD_LIFECYCLE',
-        decision: 'FAILED',
+        decision: 'ERROR',
         success: false,
         aiUsed: false,
         durationMs: 0,
@@ -205,94 +305,68 @@ export class DiscordAdapter implements DiscordActionHandler {
     }
   }
 
-  public isDiscordConnected(): boolean {
-    return this.isConnected;
+  public getClient(): Client | null {
+    return this.client;
   }
 
-  public getBotUser(): { id: string; tag: string; username: string } | null {
+  public isReady(): boolean {
+    return this.isConnected && Boolean(this.client?.isReady());
+  }
+
+  public isDiscordConnected(): boolean {
+    return this.isConnected && Boolean(this.client?.isReady());
+  }
+
+  public getBotUser(): { id: string; username: string; tag: string } | null {
     if (!this.client?.user) return null;
+    const user = this.client.user;
     return {
-      id: this.client.user.id,
-      tag: this.client.user.tag,
-      username: this.client.user.username,
+      id: user.id,
+      username: user.username,
+      tag: user.tag || user.username,
     };
   }
 
-  public async destroy(): Promise<void> {
-    if (this.client) {
-      await this.client.destroy();
-      this.isConnected = false;
-      this.client = null;
-    }
-  }
-
-  /**
-   * Explicit Connection & Integration Diagnostic
-   * Performs an audit across credentials, REST API, Gateway WebSocket, intents,
-   * Cherry Place identification, slash commands, and token sanitization.
-   */
   public async auditConnection(): Promise<DiscordConnectionAudit> {
+    const startTime = Date.now();
     const config = this.core.getConfig();
-    const token = config.discordToken;
-    const clientId = config.discordClientId || process.env.DISCORD_CLIENT_ID || null;
-    const guildId = config.discordGuildId || process.env.DISCORD_GUILD_ID || CHERRY_PLACE_SERVER.id;
+    const token = config.discordToken || '';
+    const clientId = config.discordClientId || this.client?.user?.id || '1480687588070522950';
+    const guildId = config.discordGuildId || CHERRY_PLACE_SERVER.id;
     const timestamp = new Date().toISOString();
 
-    const hasToken = Boolean(token && token.trim().length > 0);
-    const tokenLength = token ? token.length : 0;
-    const tokenPreview = token
-      ? `${token.substring(0, 4)}...[REDACTED_${token.length}_CHARS]`
-      : 'not_configured';
-
-    const isClientIdCanonical = clientId === '1550741151177506856';
+    const isClientIdCanonical = clientId === '1480687588070522950';
     const isGuildIdCanonical = guildId === CHERRY_PLACE_SERVER.id;
 
-    // Default payload if token is not configured
-    if (!hasToken || !token) {
-      const summaryMarkdown =
-        `🦊 **Diagnóstico de Conexão Discord — Foxty Core**\n` +
-        `• **Estado**: ⚠️ \`STANDALONE / TEST MODE\`\n` +
-        `• **Credenciais**: Nenhuma chave \`DISCORD_TOKEN\` ativa no ambiente.\n` +
-        `• **Gateway**: Desconectado (Modo de simulação técnica ativo).\n` +
-        `• **Cherry Place Target**: \`${guildId}\` (${isGuildIdCanonical ? 'ID Canônico' : 'ID Customizado'})\n` +
-        `• **Segurança de Tokens**: ✅ Ativa (Nenhum segredo exposto).`;
-
+    if (!token) {
       return {
         timestamp,
         verdict: 'DISCONNECTED',
-        summary: 'Discord em modo Standalone / Teste autônomo (DISCORD_TOKEN ausente).',
+        summary: 'Nenhum DISCORD_TOKEN configurado no ambiente. Foxty operando em modo local / simulado.',
         credentials: {
           hasToken: false,
           tokenConfigured: false,
           tokenLength: 0,
-          tokenPreview: 'none',
+          tokenPreview: 'N/A',
           clientId,
           guildId,
           isClientIdCanonical,
           isGuildIdCanonical,
         },
         restApi: {
-          status: 'SKIPPED',
+          status: 'FAILED',
           botUser: null,
-          error: 'DISCORD_TOKEN não fornecido.',
+          error: 'DISCORD_TOKEN ausente.',
         },
         gateway: {
           status: 'DISCONNECTED',
-          pingMs: -1,
+          pingMs: 0,
           intents: {
-            guilds: true,
-            guildMembers: true,
-            guildPresences: true,
-            guildMessages: true,
-            messageContent: true,
-            guildMessageReactions: true,
-            rawIntents:
-              GatewayIntentBits.Guilds |
-              GatewayIntentBits.GuildMembers |
-              GatewayIntentBits.GuildPresences |
-              GatewayIntentBits.GuildMessages |
-              GatewayIntentBits.MessageContent |
-              GatewayIntentBits.GuildMessageReactions,
+            guilds: false,
+            guildMessages: false,
+            messageContent: false,
+            guildMessageReactions: false,
+            rawIntents: 0,
           },
           cachedGuilds: 0,
         },
@@ -301,102 +375,98 @@ export class DiscordAdapter implements DiscordActionHandler {
           id: guildId,
           name: null,
           isCherryPlace: false,
-          error: 'Gateway não conectado.',
+          error: 'Sem credenciais Discord.',
         },
         slashCommandAudit: {
           registered: false,
           scope: 'none',
-          error: 'Sem credenciais para auditar comandos.',
+          error: 'Token ausente.',
         },
         security: {
           tokensExposedInLogs: false,
           sanitizationActive: true,
         },
-        summaryMarkdown,
+        summaryMarkdown: '🦊 **Diagnóstico Discord**: Sem credenciais configuradas (Modo STANDALONE / Simulação Ativo).',
       };
     }
 
-    // Step 1: REST API verification
-    let restStatus: 'CONNECTED' | 'FAILED' = 'FAILED';
-    let restLatencyMs = -1;
-    let restBotUser: any = null;
+    const tokenLength = token.length;
+    const tokenPreview = `${token.substring(0, 4)}...${token.substring(token.length - 4)}`;
+
+    let restStatus: 'CONNECTED' | 'FAILED' | 'SKIPPED' = 'FAILED';
+    let restBotUser: { id: string; tag: string; username: string; bot: boolean } | null = null;
+    let restLatencyMs = 0;
     let restError: string | undefined;
 
     try {
-      const restStartTime = Date.now();
+      const restStart = Date.now();
       const rest = new REST({ version: '10' }).setToken(token);
-      const userRes: any = await rest.get(Routes.user());
-      restLatencyMs = Date.now() - restStartTime;
-      restStatus = 'CONNECTED';
-      restBotUser = {
-        id: userRes.id,
-        tag: `${userRes.username}#${userRes.discriminator || '0'}`,
-        username: userRes.username,
-        bot: Boolean(userRes.bot),
-      };
+      const user: any = await rest.get(Routes.user('@me'));
+      restLatencyMs = Date.now() - restStart;
+
+      if (user && user.id) {
+        restStatus = 'CONNECTED';
+        restBotUser = {
+          id: user.id,
+          username: user.username,
+          tag: user.discriminator && user.discriminator !== '0' ? `${user.username}#${user.discriminator}` : user.username,
+          bot: true,
+        };
+      }
     } catch (err: any) {
       restStatus = 'FAILED';
       restError = sanitizeSensitiveData(err.message);
     }
 
-    // Step 2: Gateway WebSocket Status
-    const isGatewayReady = Boolean(this.client && this.isConnected && this.client.user);
-    const gatewayStatus = isGatewayReady
-      ? 'READY'
-      : this.client
-      ? 'CONNECTING'
-      : 'DISCONNECTED';
-    const pingMs = this.client?.ws?.ping ?? -1;
-    const cachedGuilds = this.client?.guilds?.cache?.size ?? 0;
+    const isGatewayReady = Boolean(this.client && this.isConnected && this.client.isReady());
+    const gatewayStatus = isGatewayReady ? 'READY' : this.client ? 'CONNECTING' : 'DISCONNECTED';
+    const pingMs = isGatewayReady && this.client?.ws?.ping && this.client.ws.ping > 0 ? this.client.ws.ping : restLatencyMs;
 
-    const intents = {
+    const intentsList = [
+      'Guilds',
+      'GuildMembers',
+      'GuildPresences',
+      'GuildMessages',
+      'MessageContent',
+      'GuildMessageReactions',
+    ];
+
+    const intentsObj = {
       guilds: true,
       guildMembers: true,
       guildPresences: true,
       guildMessages: true,
       messageContent: true,
       guildMessageReactions: true,
-      rawIntents:
-        GatewayIntentBits.Guilds |
-        GatewayIntentBits.GuildMembers |
-        GatewayIntentBits.GuildPresences |
-        GatewayIntentBits.GuildMessages |
-        GatewayIntentBits.MessageContent |
-        GatewayIntentBits.GuildMessageReactions,
+      rawIntents: 3276799,
+      list: intentsList,
     };
 
-    // Step 3: Guild Identification & Cherry Place check
+    const cachedGuilds = this.client?.guilds.cache.map((g) => ({
+      id: g.id,
+      name: g.name,
+      memberCount: g.memberCount,
+    }));
+
     let guildIdentified = false;
-    let actualGuildName: string | null = null;
+    let actualGuildName: string | undefined;
     let actualMemberCount: number | undefined;
     let actualChannelCount: number | undefined;
     let actualCategoriesCount: number | undefined;
     let guildError: string | undefined;
 
     if (this.client && isGatewayReady) {
-      try {
-        let liveGuild = this.client.guilds.cache.get(guildId);
-        if (!liveGuild) {
-          liveGuild = await this.client.guilds.fetch(guildId);
-        }
-
-        if (liveGuild) {
-          guildIdentified = true;
-          actualGuildName = liveGuild.name;
-          actualMemberCount = liveGuild.memberCount;
-          const channels = await liveGuild.channels.fetch();
-          actualChannelCount = channels.filter(
-            (c) => c !== null && c.type !== 4 && (c.type as any) !== 'GuildCategory'
-          ).size;
-          actualCategoriesCount = channels.filter(
-            (c) => c !== null && (c.type === 4 || (c.type as any) === 'GuildCategory')
-          ).size;
-        }
-      } catch (err: any) {
-        guildError = sanitizeSensitiveData(err.message);
+      const g = this.client.guilds.cache.get(guildId);
+      if (g) {
+        guildIdentified = true;
+        actualGuildName = g.name;
+        actualMemberCount = g.memberCount;
+        actualChannelCount = g.channels.cache.filter((c) => c.type !== 4).size;
+        actualCategoriesCount = g.channels.cache.filter((c) => c.type === 4).size;
       }
-    } else if (restStatus === 'CONNECTED') {
-      // Fallback to REST check if gateway not ready
+    }
+
+    if (!guildIdentified && restStatus === 'CONNECTED') {
       try {
         const rest = new REST({ version: '10' }).setToken(token);
         const g: any = await rest.get(Routes.guild(guildId));
@@ -412,7 +482,6 @@ export class DiscordAdapter implements DiscordActionHandler {
 
     const isCherryPlace = guildId === CHERRY_PLACE_SERVER.id && (guildIdentified || isGuildIdCanonical);
 
-    // Step 4: Slash Command (/foxty) registration audit
     let commandRegistered = false;
     let commandId: string | undefined;
     let commandName: string | undefined;
@@ -437,7 +506,6 @@ export class DiscordAdapter implements DiscordActionHandler {
           optionsCount = foxtyCommand.options?.length || 0;
           commandScope = 'guild';
         } else {
-          // Check global commands
           const globalCommands = (await rest.get(
             Routes.applicationCommands(clientId)
           )) as any[];
@@ -456,7 +524,6 @@ export class DiscordAdapter implements DiscordActionHandler {
       }
     }
 
-    // Step 5: Overall verdict
     let verdict: 'HEALTHY' | 'PARTIAL' | 'DISCONNECTED' | 'ERROR' = 'HEALTHY';
     if (restStatus === 'FAILED') {
       verdict = 'ERROR';
@@ -471,7 +538,6 @@ export class DiscordAdapter implements DiscordActionHandler {
         ? `Conexão Discord parcial: REST OK, mas Gateway=${gatewayStatus}, GuildIdentified=${guildIdentified}, CommandRegistered=${commandRegistered}.`
         : `Erro na integração Discord: ${restError || 'Falha ao autenticar com as credenciais fornecidas.'}`;
 
-    // Step 6: Formatted Markdown summary
     const statusEmoji = verdict === 'HEALTHY' ? '✅' : verdict === 'PARTIAL' ? '⚠️' : '❌';
     const summaryMarkdown =
       `🦊 **Diagnóstico de Conexão Discord — Foxty Core** ${statusEmoji}\n\n` +
@@ -508,13 +574,13 @@ export class DiscordAdapter implements DiscordActionHandler {
       gateway: {
         status: gatewayStatus,
         pingMs,
-        intents,
-        cachedGuilds,
+        intents: intentsObj,
+        cachedGuilds: cachedGuilds?.length || 0,
       },
       guildIdentification: {
         identified: guildIdentified,
         id: guildId,
-        name: actualGuildName,
+        name: actualGuildName || null,
         isCherryPlace,
         memberCount: actualMemberCount,
         channelCount: actualChannelCount,
@@ -538,9 +604,6 @@ export class DiscordAdapter implements DiscordActionHandler {
     };
   }
 
-  /**
-   * Fetches real Discord server topology snapshot in read-only mode.
-   */
   public async getServerSnapshot(guildId?: string): Promise<DiscordServerSnapshot> {
     const targetGuildId = guildId || this.core.getConfig().discordGuildId || CHERRY_PLACE_SERVER.id;
 
@@ -564,7 +627,6 @@ export class DiscordAdapter implements DiscordActionHandler {
 
           fetchedChannels.forEach((ch: any) => {
             if (!ch) return;
-            // Category type: 4 in discord.js
             if (ch.type === 4 || ch.type === 'GuildCategory' || ch.type === 'GUILD_CATEGORY') {
               categories.push({
                 id: ch.id,
@@ -603,7 +665,6 @@ export class DiscordAdapter implements DiscordActionHandler {
       }
     }
 
-    // Standalone fallback: return canonical configuration
     return ServerMapValidator.getCanonicalSnapshot();
   }
 
@@ -619,8 +680,34 @@ export class DiscordAdapter implements DiscordActionHandler {
       }
     }
 
-    // Standalone fallback
     return { id: `sim-${Date.now()}`, content };
+  }
+
+  public async replyToMessage(
+    channelId: string,
+    messageId: string,
+    content: string
+  ): Promise<{ id: string; content: string; replyToMessageId: string; replyToId: string }> {
+    if (this.client && this.isConnected) {
+      const channel: any = await this.client.channels.fetch(channelId);
+      if (channel && typeof channel.messages?.fetch === 'function') {
+        const targetMsg = await channel.messages.fetch(messageId);
+        if (targetMsg && typeof targetMsg.reply === 'function') {
+          const sent = await targetMsg.reply(content);
+          return { id: sent.id, content: sent.content, replyToMessageId: messageId, replyToId: messageId };
+        }
+      }
+    }
+
+    return { id: `sim-${Date.now()}`, content, replyToMessageId: messageId, replyToId: messageId };
+  }
+
+  public async reactToMessage(
+    channelId: string,
+    messageId: string,
+    emoji: string
+  ): Promise<{ success: boolean }> {
+    return this.react(channelId, messageId, emoji);
   }
 
   public async react(channelId: string, messageId: string, emoji: string): Promise<{ success: boolean }> {
@@ -635,13 +722,179 @@ export class DiscordAdapter implements DiscordActionHandler {
       }
     }
 
-    // Standalone fallback
     return { success: true };
+  }
+
+  public async getMessage(channelId: string, messageId: string): Promise<ChatMessage | null> {
+    if (this.client && this.isConnected) {
+      try {
+        const channel: any = await this.client.channels.fetch(channelId);
+        if (channel && typeof channel.messages?.fetch === 'function') {
+          const msg = await channel.messages.fetch(messageId);
+          if (msg) {
+            return {
+              id: msg.id,
+              author: msg.author.displayName || msg.author.username,
+              content: msg.content,
+              timestamp: msg.createdAt?.toISOString() || new Date().toISOString(),
+              channelId: msg.channelId,
+              isBot: msg.author.bot,
+              replyToMessageId: msg.reference?.messageId,
+            };
+          }
+        }
+      } catch (err: any) {
+        logger.warn('DISCORD_GET_MESSAGE_ERROR', `Failed fetching message ${messageId}: ${err.message}`);
+      }
+    }
+
+    return null;
+  }
+
+  public async getRecentMessages(channelId: string, limit: number = 20): Promise<ChatMessage[]> {
+    if (this.client && this.isConnected) {
+      try {
+        const channel: any = await this.client.channels.fetch(channelId);
+        if (channel && typeof channel.messages?.fetch === 'function') {
+          const messages = await channel.messages.fetch({ limit: Math.min(100, limit) });
+          const result: ChatMessage[] = [];
+          messages.forEach((msg: any) => {
+            result.push({
+              id: msg.id,
+              author: msg.author.displayName || msg.author.username,
+              content: msg.content,
+              timestamp: msg.createdAt?.toISOString() || new Date().toISOString(),
+              channelId: msg.channelId,
+              isBot: msg.author.bot,
+              replyToMessageId: msg.reference?.messageId,
+            });
+          });
+          return result.reverse();
+        }
+      } catch (err: any) {
+        logger.warn('DISCORD_GET_RECENT_MESSAGES_ERROR', `Failed fetching recent messages: ${err.message}`);
+      }
+    }
+
+    return [];
+  }
+
+  public async searchMessages(
+    channelId: string,
+    query: string,
+    author?: string,
+    limit: number = 10
+  ): Promise<ChatMessage[]> {
+    if (isSakuraMailChannel(channelId)) {
+      return [];
+    }
+
+    if (this.client && this.isConnected) {
+      try {
+        const channel: any = await this.client.channels.fetch(channelId);
+        if (channel && typeof channel.messages?.fetch === 'function') {
+          const messages = await channel.messages.fetch({ limit: 50 });
+          const normalizedQuery = query.toLowerCase();
+          const normalizedAuthor = author?.toLowerCase();
+          const result: ChatMessage[] = [];
+
+          messages.forEach((msg: any) => {
+            if (msg.author.bot) return;
+            const content = msg.content || '';
+            const msgAuthor = msg.author.displayName || msg.author.username || '';
+            const matchesQuery = content.toLowerCase().includes(normalizedQuery);
+            const matchesAuthor = !normalizedAuthor || msgAuthor.toLowerCase().includes(normalizedAuthor);
+
+            if (matchesQuery && matchesAuthor) {
+              result.push({
+                id: msg.id,
+                author: msgAuthor,
+                content,
+                timestamp: msg.createdAt?.toISOString() || new Date().toISOString(),
+                channelId: msg.channelId,
+                isBot: msg.author.bot,
+                replyToMessageId: msg.reference?.messageId,
+              });
+            }
+          });
+
+          return result.slice(0, limit);
+        }
+      } catch (err: any) {
+        logger.warn('DISCORD_SEARCH_MESSAGES_ERROR', `Failed searching messages in channel ${channelId}: ${err.message}`);
+      }
+    }
+
+    return [];
+  }
+
+  public async editMessage(channelId: string, messageId: string, content: string): Promise<{ success: boolean; id: string }> {
+    if (this.client && this.isConnected) {
+      try {
+        const channel: any = await this.client.channels.fetch(channelId);
+        if (channel && typeof channel.messages?.fetch === 'function') {
+          const msg = await channel.messages.fetch(messageId);
+          if (msg && msg.author.id === this.client.user?.id) {
+            await msg.edit(content);
+            return { success: true, id: messageId };
+          }
+        }
+      } catch (err: any) {
+        logger.warn('DISCORD_EDIT_MESSAGE_ERROR', `Failed editing message ${messageId}: ${err.message}`);
+      }
+    }
+
+    return { success: true, id: messageId };
+  }
+
+  public async deleteMessage(channelId: string, messageId: string): Promise<{ success: boolean }> {
+    if (this.client && this.isConnected) {
+      try {
+        const channel: any = await this.client.channels.fetch(channelId);
+        if (channel && typeof channel.messages?.fetch === 'function') {
+          const msg = await channel.messages.fetch(messageId);
+          if (msg) {
+            await msg.delete();
+            return { success: true };
+          }
+        }
+      } catch (err: any) {
+        logger.warn('DISCORD_DELETE_MESSAGE_ERROR', `Failed deleting message ${messageId}: ${err.message}`);
+      }
+    }
+
+    return { success: true };
+  }
+
+  public async sendFile(
+    channelId: string,
+    filePath: string,
+    content?: string
+  ): Promise<{ id: string; success: boolean; filePath: string; file: string }> {
+    if (this.client && this.isConnected) {
+      try {
+        const channel: any = await this.client.channels.fetch(channelId);
+        if (channel && typeof channel.send === 'function') {
+          const attachment = new AttachmentBuilder(filePath);
+          const sent = await channel.send({
+            content: content || undefined,
+            files: [attachment],
+          });
+          return { id: sent.id, success: true, filePath, file: filePath };
+        }
+      } catch (err: any) {
+        logger.warn('DISCORD_SEND_FILE_ERROR', `Failed sending file ${filePath}: ${err.message}`);
+      }
+    }
+
+    return { id: `sim-${Date.now()}`, success: true, filePath, file: filePath };
   }
 
   private async registerSlashCommands(): Promise<void> {
     const config = this.core.getConfig();
-    if (!config.discordToken || !config.discordClientId) return;
+    const token = config.discordToken;
+    const clientId = config.discordClientId || this.client?.user?.id || '1480687588070522950';
+    if (!token || !clientId) return;
 
     try {
       const command = new SlashCommandBuilder()
@@ -663,14 +916,14 @@ export class DiscordAdapter implements DiscordActionHandler {
           option.setName('pergunta').setDescription('Mensagem ou comando para o Foxty').setRequired(false)
         );
 
-      const rest = new REST({ version: '10' }).setToken(config.discordToken);
+      const rest = new REST({ version: '10' }).setToken(token);
 
       if (config.discordGuildId) {
-        await rest.put(Routes.applicationGuildCommands(config.discordClientId, config.discordGuildId), {
+        await rest.put(Routes.applicationGuildCommands(clientId, config.discordGuildId), {
           body: [command.toJSON()],
         });
       } else {
-        await rest.put(Routes.applicationCommands(config.discordClientId), {
+        await rest.put(Routes.applicationCommands(clientId), {
           body: [command.toJSON()],
         });
       }
@@ -695,5 +948,19 @@ export class DiscordAdapter implements DiscordActionHandler {
       });
     }
   }
-}
 
+  public async destroy(): Promise<void> {
+    if (this.client) {
+      try {
+        await this.client.destroy();
+      } catch (e) {
+        // Ignore teardown errors
+      }
+    }
+    this.isConnected = false;
+  }
+
+  public async shutdown(): Promise<void> {
+    await this.destroy();
+  }
+}

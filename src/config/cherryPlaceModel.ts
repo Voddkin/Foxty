@@ -581,7 +581,8 @@ export function getChannelsByCategoryId(categoryId: string): CherryPlaceChannel[
 
 export function isChannelBlocked(channelId: string): boolean {
   const channel = CHANNELS_BY_ID.get(channelId);
-  return !channel || channel.foxtyPolicy === 'Uso Bloqueado';
+  if (!channel) return false;
+  return channel.foxtyPolicy === 'Uso Bloqueado' || (channel as any).foxtyPolicy === 'BLOQUEADO';
 }
 
 export function isVoiceChannel(channelId: string): boolean {
@@ -590,7 +591,7 @@ export function isVoiceChannel(channelId: string): boolean {
 }
 
 export function isSakuraMailChannel(channelId: string): boolean {
-  return channelId === CHERRY_PLACE_CHANNEL_IDS.CAIXA_DE_CORREIO;
+  return channelId === CHERRY_PLACE_CHANNEL_IDS.CAIXA_DE_CORREIO || channelId.toLowerCase().includes('sakuramail');
 }
 
 export function getChannelUsagePolicy(channelId: string): FoxtyChannelPolicy | undefined {

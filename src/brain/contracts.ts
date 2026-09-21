@@ -33,15 +33,24 @@ export const ToolCallSchema = z.object({
 export const ActionRequestSchema = z.object({
   tool: z.enum([
     'send_message',
-    'react',
     'send_multiple_messages',
-    'save_memory',
-    'search_memory',
+    'reply_to_message',
+    'react_to_message',
+    'react',
+    'get_message',
+    'search_messages',
+    'get_recent_messages',
+    'edit_message',
+    'delete_message',
+    'send_file',
     'get_channel_info',
     'get_server_info',
+    'save_memory',
+    'search_memory',
     'trigger_event',
   ]),
   arguments: z.record(z.any()).default({}),
+  callId: z.string().optional(),
 });
 
 export const MemoryCandidateSchema = z.object({

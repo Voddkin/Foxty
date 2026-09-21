@@ -396,6 +396,7 @@ export async function runChannelBehaviorPolicyTests(): Promise<{ passed: number;
     ...baseConfig,
     deepSeek: {
       ...baseConfig.deepSeek,
+      apiKey: '',
       allowHeuristicFallback: true,
     },
     testMode: true,

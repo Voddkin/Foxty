@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import { MemoryItem, MemoryType } from '../types.js';
-import { IMemoryStore, MemorySearchOptions, MemoryHealth } from './MemoryStore.js';
+import { IMemoryStore, MemorySearchOptions, MemoryHealth, MemoryItemInput } from './MemoryStore.js';
 import { sanitizeSensitiveData } from '../core/Logger.js';
 
 export interface PersistentMemoryStoreOptions {
@@ -82,49 +82,59 @@ export class PersistentMemoryStore implements IMemoryStore {
     }
   }
 
-  public async save(item: Omit<MemoryItem, 'id' | 'createdAt'> & { id?: string }): Promise<MemoryItem> {
+  public async save(item: MemoryItemInput): Promise<MemoryItem> {
     this.lastOperation = 'save';
     this.lastOperationTime = new Date().toISOString();
 
-    // 1. Guardrail: Zero Secret Exposure (reject/sanitize credentials, tokens, passwords)
-    const lowerContent = item.content.toLowerCase();
+    let content = item.content;
+    const lowerContent = content.toLowerCase();
     const sensitiveTokens = ['senha', 'password', 'token', 'secret', 'credencial', 'api_key'];
     const containsSensitive = sensitiveTokens.some((kw) => lowerContent.includes(kw));
     if (containsSensitive) {
       // Strips or sanitizes sensitive data rather than persisting raw secrets
-      item.content = sanitizeSensitiveData(item.content);
+      content = sanitizeSensitiveData(content);
     }
 
     // 2. Guardrail: SakuraMail Privacy Boundary
     // Never persist private mailbox correspondence into persistent memory
     const lowerSource = (item.source || '').toLowerCase();
+    const tags = Array.isArray(item.tags) ? item.tags : [];
     const isSakuraMail =
       lowerSource.includes('sakuramail') ||
-      item.tags.some((t) => t.toLowerCase().includes('sakuramail_letter') || t.toLowerCase().includes('mailbox_secret'));
-    if (isSakuraMail && item.safeForTeasing) {
-      // Force non-teasing and private isolation
-      item.safeForTeasing = false;
-    }
+      tags.some((t) => t.toLowerCase().includes('sakuramail_letter') || t.toLowerCase().includes('mailbox_secret'));
 
-    // 3. Guardrail: Sensitive content cannot be marked safe for teasing
-    let safeForTeasing = item.safeForTeasing;
+    let safeForTeasing = item.safeForTeasing ?? true;
     if (containsSensitive || isSakuraMail) {
       safeForTeasing = false;
     }
 
+    const importance = typeof item.importance === 'number' ? Math.max(0, Math.min(1, item.importance)) : 0.8;
+    const confidence = typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : 0.9;
+
     // 4. Guardrail: Minimum Confidence Threshold for AI Candidates (Doc 06 & Technical Req)
-    const isAiCandidate = item.tags?.includes('deepseek-suggested') || item.source === 'deepseek';
-    if (isAiCandidate && item.confidence < 0.85) {
-      throw new Error(`[Memory Policy Violation] Candidate confidence ${item.confidence} is below required threshold 0.85`);
+    const isAiCandidate = tags.includes('deepseek-suggested') || item.source === 'deepseek';
+    if (isAiCandidate && confidence < 0.85) {
+      throw new Error(`[Memory Policy Violation] Candidate confidence ${confidence} is below required threshold 0.85`);
     }
 
     const id = item.id || `mem-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
     const createdAt = new Date().toISOString();
     const memory: MemoryItem = {
-      ...item,
       id,
+      content,
+      type: item.type,
+      importance,
+      confidence,
+      source: item.source || 'system',
+      targetUser: item.targetUser,
       createdAt,
+      lastConfirmed: item.lastConfirmed || createdAt,
+      expiresAt: item.expiresAt,
       safeForTeasing,
+      retention: item.retention || 'permanent',
+      tags,
+      scope: item.scope || 'cherry_place',
+      metadata: item.metadata || {},
     };
 
     const stmt = this.db.prepare(`
@@ -264,6 +274,8 @@ export class PersistentMemoryStore implements IMemoryStore {
         provider: 'sqlite',
         connected: !!ping?.alive,
         available: true,
+        readOk: !!ping?.alive,
+        writeOk: !!ping?.alive,
         readWriteOk: true,
         recordCount,
         totalRecords: recordCount,
@@ -278,6 +290,8 @@ export class PersistentMemoryStore implements IMemoryStore {
         provider: 'sqlite',
         connected: false,
         available: false,
+        readOk: false,
+        writeOk: false,
         readWriteOk: false,
         recordCount: 0,
         totalRecords: 0,

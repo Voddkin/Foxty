@@ -1,38 +1,36 @@
-import { BrainDecision, ContextPackage, ThinkingMode, ReasoningEffort } from '../types.js';
+import {
+  BrainDecision,
+  ContextPackage,
+  CircuitBreakerStatus,
+  CircuitBreakerState,
+  ActionRequest,
+} from '../types.js';
 import { parseBrainOutput } from './contracts.js';
 import { logger, sanitizeSensitiveData } from '../core/Logger.js';
 import { isSakuraMailChannel, isChannelBlocked, loadConfig } from '../config/index.js';
+import { RuntimeKnowledgeLoader, RuntimeKnowledgeStatus } from './RuntimeKnowledgeLoader.js';
+import { ToolRegistry } from '../tools/ToolRegistry.js';
+import { ToolExecutor } from '../tools/ToolExecutor.js';
 
 export interface DeepSeekConfig {
   apiKey?: string;
-  baseUrl?: string;
-  model?: string;
-  temperature?: number;
-  maxTokens?: number;
-  timeoutMs?: number;
-  thinkingMode?: ThinkingMode;
-  reasoningEffort?: ReasoningEffort;
-  allowHeuristicFallback?: boolean;
-  fetchFn?: typeof fetch;
-}
-
-export type CircuitBreakerState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
-
-export interface CircuitBreakerStatus {
-  state: CircuitBreakerState;
-  failureCount: number;
-  reason?: string;
-  cooldownRemainingMs: number;
-  lastFailureTime?: number;
-}
-
-export interface DeepSeekDiagnostic {
-  configured: boolean;
   baseUrl: string;
   model: string;
-  status: 'active' | 'standby_insufficient_balance' | 'error' | 'disabled';
-  circuitBreaker: 'open' | 'closed' | 'half_open';
-  circuitBreakerDetails?: CircuitBreakerStatus;
+  timeoutMs: number;
+  maxTokens: number;
+  temperature: number;
+  reasoningEffort?: 'low' | 'medium' | 'high';
+  allowHeuristicFallback?: boolean;
+  fetchFn?: typeof fetch;
+  knowledgeLoader?: RuntimeKnowledgeLoader;
+}
+
+export interface DeepSeekDiagnostics {
+  configured: boolean;
+  model: string;
+  status: 'operational' | 'standby_insufficient_balance' | 'degraded_timeout' | 'error' | 'disabled';
+  circuitBreaker: CircuitBreakerState;
+  circuitBreakerDetails: CircuitBreakerStatus;
   lastCallTimestamp: string | null;
   lastTokensUsed: number;
   totalTokensUsed: number;
@@ -40,8 +38,11 @@ export interface DeepSeekDiagnostic {
   fallbackEnabled: boolean;
   lastError: string | null;
   latencyMs: number;
-  lastAiResult: 'REAL_AI' | 'FALLBACK' | 'SILENCE' | 'ERROR' | 'CIRCUIT_BREAKER' | 'NONE';
+  lastAiResult: 'REAL_AI' | 'FALLBACK' | 'CIRCUIT_BREAKER' | 'SILENCE' | 'ERROR' | 'NONE';
+  knowledge: RuntimeKnowledgeStatus;
 }
+
+export type DeepSeekDiagnostic = DeepSeekDiagnostics;
 
 export interface DeepSeekTestResult {
   success: boolean;
@@ -58,46 +59,76 @@ export interface DeepSeekTestResult {
   error?: string;
 }
 
-export class DeepSeekAdapter {
-  private config: Required<Omit<DeepSeekConfig, 'apiKey' | 'reasoningEffort' | 'fetchFn'>> & {
-    apiKey?: string;
-    reasoningEffort?: ReasoningEffort;
-  };
-  private fetchImpl: typeof fetch;
+export interface EvaluateOptions {
+  toolExecutor?: ToolExecutor;
+  toolRegistry?: ToolRegistry;
+  maxToolTurns?: number;
+}
 
-  // Circuit Breaker State
-  private cbState: CircuitBreakerState = 'CLOSED';
-  private cbFailureCount: number = 0;
-  private cbLastFailureTime: number = 0;
-  private cbCooldownMs: number = 0;
-  private cbReason?: string;
+export class DeepSeekAdapter {
+  private config: DeepSeekConfig;
+  private fetchImpl: typeof fetch;
+  private knowledgeLoader: RuntimeKnowledgeLoader;
+  private toolRegistry: ToolRegistry;
 
   // Diagnostics & Observability
-  private lastAiCallTimestamp?: number;
-  private lastAiResult: 'REAL_AI' | 'FALLBACK' | 'SILENCE' | 'ERROR' | 'CIRCUIT_BREAKER' | 'NONE' = 'NONE';
-  private lastTokens: number = 0;
-  private totalTokensUsed: number = 0;
-  private totalAiCalls: number = 0;
-  private lastError?: string;
-  private lastLatencyMs: number = 0;
+  private totalTokensUsed = 0;
+  private totalAiCalls = 0;
+  private lastTokens = 0;
+  private lastLatencyMs = 0;
+  private lastAiCallTimestamp = 0;
+  private lastError: string | undefined;
+  private lastAiResult: 'REAL_AI' | 'FALLBACK' | 'CIRCUIT_BREAKER' | 'SILENCE' | 'ERROR' | 'NONE' = 'NONE';
 
-  constructor(config: DeepSeekConfig) {
+  // Circuit Breaker State (Fail-Safe Isolation)
+  private cbState: CircuitBreakerState = 'CLOSED';
+  private cbFailureCount = 0;
+  private cbLastFailureTime = 0;
+  private cbCooldownMs = 0;
+  private cbReason?: string;
+
+  constructor(config: Partial<DeepSeekConfig> = {}) {
     this.config = {
-      baseUrl: config.baseUrl || 'https://api.deepseek.com',
-      model: config.model || 'deepseek-flash',
       apiKey: config.apiKey,
-      temperature: config.temperature ?? 0.7,
-      maxTokens: config.maxTokens ?? 600,
-      timeoutMs: config.timeoutMs ?? 15000,
-      thinkingMode: config.thinkingMode ?? 'none',
-      reasoningEffort: config.reasoningEffort,
-      allowHeuristicFallback: config.allowHeuristicFallback ?? false,
+      baseUrl: config.baseUrl || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
+      model: config.model || process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+      timeoutMs: config.timeoutMs ?? (Number(process.env.DEEPSEEK_TIMEOUT_MS) || 15000),
+      maxTokens: config.maxTokens ?? (Number(process.env.DEEPSEEK_MAX_TOKENS) || 1500),
+      temperature: config.temperature ?? (Number(process.env.DEEPSEEK_TEMPERATURE) || 0.6),
+      reasoningEffort: config.reasoningEffort || (process.env.DEEPSEEK_REASONING_EFFORT as any),
+      allowHeuristicFallback:
+        config.allowHeuristicFallback ??
+        (process.env.DEEPSEEK_ALLOW_HEURISTIC_FALLBACK === 'true'),
+      fetchFn: config.fetchFn,
+      knowledgeLoader: config.knowledgeLoader,
     };
-    this.fetchImpl = config.fetchFn || (typeof fetch !== 'undefined' ? fetch : (globalThis as any).fetch);
+
+    this.fetchImpl = this.config.fetchFn || globalThis.fetch;
+    this.knowledgeLoader = config.knowledgeLoader || new RuntimeKnowledgeLoader();
+    this.toolRegistry = new ToolRegistry();
+
+    // Perform initial knowledge load
+    this.knowledgeLoader.loadAllDocuments();
   }
 
-  public setFetchImplementation(fetchFn: typeof fetch): void {
-    this.fetchImpl = fetchFn;
+  public setFetchImplementation(fn: typeof fetch): void {
+    this.fetchImpl = fn;
+  }
+
+  public getRuntimeKnowledgeLoader(): RuntimeKnowledgeLoader {
+    return this.knowledgeLoader;
+  }
+
+  public resetBalanceStatus(): void {
+    this.recordCircuitBreakerSuccess();
+  }
+
+  public getKnowledgeStatus(): RuntimeKnowledgeStatus {
+    return this.knowledgeLoader.getStatus();
+  }
+
+  public reloadRuntimeKnowledge(): RuntimeKnowledgeStatus {
+    return this.knowledgeLoader.loadAllDocuments();
   }
 
   public getConfig(): Readonly<DeepSeekConfig> {
@@ -142,40 +173,59 @@ export class DeepSeekAdapter {
     this.cbLastFailureTime = Date.now();
     this.cbCooldownMs = cooldownMs;
     this.cbReason = reason;
+
+    logger.warn('DEEPSEEK_CIRCUIT_BREAKER', `Circuit breaker TRIPPED into OPEN state. Reason: ${reason}. Cooldown: ${cooldownMs}ms`);
   }
 
   private recordCircuitBreakerSuccess(): void {
+    if (this.cbState === 'HALF_OPEN') {
+      logger.info('DEEPSEEK_CIRCUIT_BREAKER', 'Circuit breaker recovered from HALF_OPEN to CLOSED state.');
+    }
     this.cbState = 'CLOSED';
     this.cbFailureCount = 0;
     this.cbReason = undefined;
-    this.cbCooldownMs = 0;
   }
 
   public isInsufficientBalance(): boolean {
     const cb = this.getCircuitBreakerState();
-    return cb.state === 'OPEN' && cb.reason === 'DEEPSEEK_INSUFFICIENT_BALANCE';
+    return (
+      cb.state === 'OPEN' &&
+      (cb.reason === 'DEEPSEEK_INSUFFICIENT_BALANCE' || cb.reason?.includes('402') || false)
+    );
   }
 
-  public resetBalanceStatus(): void {
-    this.resetCircuitBreaker();
+  public getInjectedConstitutionSummary(): string {
+    return this.knowledgeLoader.getInjectedConstitutionSummary();
   }
 
-  public getDiagnosticStatus(): DeepSeekDiagnostic {
+  public getDiagnosticStatus(): any {
+    const diag = this.getDiagnostics();
+    return {
+      ...diag,
+      circuitBreaker: diag.circuitBreaker.toLowerCase(),
+      status: diag.status === 'operational' ? 'active' : diag.status,
+    };
+  }
+
+  public getDiagnostics(): DeepSeekDiagnostics {
     const cb = this.getCircuitBreakerState();
-    let status: 'active' | 'standby_insufficient_balance' | 'error' | 'disabled' = 'active';
+    const cbStateNormalized: CircuitBreakerState = cb.state;
+    let status: DeepSeekDiagnostics['status'] = 'operational';
+
     if (!this.config.apiKey) {
       status = 'disabled';
-    } else if (cb.state === 'OPEN' && cb.reason === 'DEEPSEEK_INSUFFICIENT_BALANCE') {
-      status = 'standby_insufficient_balance';
-    } else if (cb.state === 'OPEN' || (this.lastError && this.lastAiResult === 'ERROR')) {
-      status = 'error';
+    } else if (cb.state === 'OPEN') {
+      if (cb.reason === 'DEEPSEEK_INSUFFICIENT_BALANCE') {
+        status = 'standby_insufficient_balance';
+      } else if (cb.reason === 'DEEPSEEK_TIMEOUT') {
+        status = 'degraded_timeout';
+      } else {
+        status = 'error';
+      }
     }
-
-    const cbStateNormalized = cb.state.toLowerCase() as 'open' | 'closed' | 'half_open';
 
     return {
       configured: Boolean(this.config.apiKey),
-      baseUrl: this.config.baseUrl,
       model: this.config.model,
       status,
       circuitBreaker: cbStateNormalized,
@@ -188,6 +238,7 @@ export class DeepSeekAdapter {
       lastError: this.lastError ? sanitizeSensitiveData(this.lastError) : null,
       latencyMs: this.lastLatencyMs || 0,
       lastAiResult: this.lastAiResult,
+      knowledge: this.knowledgeLoader.getStatus(),
     };
   }
 
@@ -236,7 +287,6 @@ export class DeepSeekAdapter {
           model: this.config.model,
           messages: [{ role: 'user', content: 'Ping: return JSON {"status":"ok"}' }],
           response_format: { type: 'json_object' },
-          max_tokens: 30,
         }),
       });
 
@@ -311,7 +361,8 @@ export class DeepSeekAdapter {
 
   public async evaluate(
     context: ContextPackage,
-    promptInstruction?: string
+    promptInstruction?: string,
+    options: EvaluateOptions = {}
   ): Promise<{
     decision: BrainDecision;
     aiUsed: boolean;
@@ -356,25 +407,10 @@ export class DeepSeekAdapter {
           success: true,
           aiUsed: false,
           durationMs: Date.now() - startTime,
-          details: `Tone: ${decision.tone}, Messages: ${decision.messages.length} (Heuristic dev fallback)`,
+          details: `Tone: ${decision.tone}, Messages: ${decision.messages.length}`,
         });
         return { decision, aiUsed: false, tokensUsed: 0 };
       }
-
-      this.lastAiResult = 'SILENCE';
-      this.lastTokens = 0;
-      this.lastError = 'DEEPSEEK_API_KEY_MISSING';
-      logger.log({
-        event: 'DeepSeek API Key Missing (Contextual Inaction)',
-        channelId: context.channel.id,
-        actionType: 'BRAIN_EVALUATION',
-        decision: 'SILENCE',
-        success: false,
-        aiUsed: false,
-        durationMs: Date.now() - startTime,
-        error: 'DEEPSEEK_API_KEY_MISSING',
-        details: 'DeepSeek API key is not configured. Contextual action skipped safely.',
-      });
 
       return {
         decision: {
@@ -416,18 +452,6 @@ export class DeepSeekAdapter {
       this.lastAiResult = 'CIRCUIT_BREAKER';
       this.lastTokens = 0;
       this.lastError = errorCode;
-      logger.log({
-        event: `DeepSeek Brain Circuit Breaker OPEN (Inaction Enforced: ${errorCode})`,
-        channelId: context.channel.id,
-        actionType: 'BRAIN_EVALUATION',
-        decision: 'CIRCUIT_BREAKER',
-        success: false,
-        aiUsed: false,
-        durationMs: Date.now() - startTime,
-        error: errorCode,
-        details: `Reason: ${cbState.reason}, Cooldown remaining: ${Math.round(cbState.cooldownRemainingMs / 1000)}s`,
-      });
-
       return {
         decision: {
           decision: 'ignore',
@@ -442,7 +466,7 @@ export class DeepSeekAdapter {
       };
     }
 
-    // Safe Observability: Log request initiation without sensitive payload dumping
+    // Safe Observability: Log request initiation
     logger.log({
       event: 'DeepSeek Request Started',
       channelId: context.channel.id,
@@ -454,137 +478,190 @@ export class DeepSeekAdapter {
       details: `Model: ${this.config.model}, Event: ${context.event?.eventType || 'chat_message'}, Timeout: ${this.config.timeoutMs}ms`,
     });
 
-    // 3. Build Prompt & User Context (Authoritative 4 Dimensions)
+    // 3. Build Prompt & User Context with Full Constitution & Message IDs
     const systemPrompt = this.buildSystemPrompt();
     const userPayload = this.buildUserPayload(context, promptInstruction);
+    const tools = (options.toolRegistry || this.toolRegistry).getDeepSeekTools();
+
+    const messages: any[] = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: JSON.stringify(userPayload) },
+    ];
+
+    let totalTokens = 0;
+    let finalPromptTokens = 0;
+    let finalCompletionTokens = 0;
+    let currentTurn = 0;
+    const maxToolTurns = options.maxToolTurns ?? 3;
+    const toolExecutor = options.toolExecutor;
 
     try {
       const endpoint = `${this.config.baseUrl.replace(/\/$/, '')}/chat/completions`;
-      const requestBody: Record<string, any> = {
-        model: this.config.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: JSON.stringify(userPayload) },
-        ],
-        response_format: { type: 'json_object' },
-        temperature: this.config.temperature,
-        max_tokens: this.config.maxTokens,
-      };
 
-      if (this.config.reasoningEffort) {
-        requestBody.reasoning_effort = this.config.reasoningEffort;
-      }
+      // Selective Thinking Mode Evaluation
+      const isComplexQuery =
+        (promptInstruction && /pesquisar|buscar|investigar|qual era|histórico/i.test(promptInstruction)) ||
+        (context.event?.content && /qual era|quem disse|lembra de|procura/i.test(context.event.content));
+      
+      const effectiveReasoningEffort = this.config.reasoningEffort || (isComplexQuery ? 'medium' : undefined);
 
-      const response = await this.fetchImpl(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.config.apiKey}`,
-        },
-        signal: AbortSignal.timeout(this.config.timeoutMs),
-        body: JSON.stringify(requestBody),
-      });
+      while (currentTurn <= maxToolTurns) {
+        currentTurn++;
 
-      // 4. Handle HTTP Status Codes and Rate Limits
-      if (!response.ok) {
-        if (response.status === 402) {
-          throw new Error('DEEPSEEK_INSUFFICIENT_BALANCE');
+        const requestBody: Record<string, any> = {
+          model: this.config.model,
+          messages,
+          response_format: { type: 'json_object' },
+          temperature: this.config.temperature,
+          max_tokens: this.config.maxTokens,
+          tools: tools.length > 0 ? tools : undefined,
+        };
+
+        if (effectiveReasoningEffort) {
+          requestBody.reasoning_effort = effectiveReasoningEffort;
         }
-        if (response.status === 429) {
-          throw new Error('DEEPSEEK_RATE_LIMIT');
-        }
-        if (response.status === 401) {
-          throw new Error('DEEPSEEK_UNAUTHORIZED');
-        }
-        if (response.status >= 500) {
-          throw new Error(`DEEPSEEK_SERVER_ERROR_${response.status}`);
-        }
-        throw new Error(`DEEPSEEK_HTTP_ERROR_${response.status}`);
-      }
 
-      const data: any = await response.json();
-      const rawOutput = data.choices?.[0]?.message?.content;
-      const usage = data.usage || {};
-      const tokensUsed = usage.total_tokens || 0;
-      const tokenDetails = {
-        promptTokens: usage.prompt_tokens,
-        completionTokens: usage.completion_tokens,
-        totalTokens: usage.total_tokens,
-      };
-
-      // 5. Handle Empty Response
-      if (!rawOutput || typeof rawOutput !== 'string' || rawOutput.trim().length === 0) {
-        throw new Error('DEEPSEEK_EMPTY_RESPONSE: Model returned an empty content payload.');
-      }
-
-      // 6. Strict Schema Validation of Model Output (Zod contracts)
-      const parsed = parseBrainOutput(rawOutput);
-      if (!parsed.success) {
-        const isJsonSyntax = parsed.error?.includes('Malformed JSON');
-        const errorCode = isJsonSyntax ? 'DEEPSEEK_INVALID_JSON' : 'DEEPSEEK_INVALID_SCHEMA';
-
-        logger.log({
-          event: `DeepSeek Output Rejected (${errorCode})`,
-          channelId: context.channel.id,
-          actionType: 'BRAIN_EVALUATION',
-          decision: 'CONTROLLED_ERROR',
-          success: false,
-          aiUsed: true,
-          tokensUsed,
-          durationMs: Date.now() - startTime,
-          error: `${errorCode}: ${parsed.error}`,
-          details: `Model: ${this.config.model}, Prompt Tokens: ${usage.prompt_tokens ?? 'N/A'}, Completion Tokens: ${usage.completion_tokens ?? 'N/A'}`,
+        const response = await this.fetchImpl(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.config.apiKey}`,
+          },
+          signal: AbortSignal.timeout(this.config.timeoutMs),
+          body: JSON.stringify(requestBody),
         });
 
-        // Controlled safe inaction: never execute unvalidated partial actions
-        return {
-          decision: {
-            decision: 'ignore',
-            action: 'ignore',
-            tone: 'clever',
-            messages: [],
-            reasoning: `Controlled rejection due to invalid brain output: ${parsed.error}`,
-          },
+        // Handle HTTP Status Codes and Rate Limits
+        if (!response.ok) {
+          if (response.status === 402) throw new Error('DEEPSEEK_INSUFFICIENT_BALANCE');
+          if (response.status === 429) throw new Error('DEEPSEEK_RATE_LIMIT');
+          if (response.status === 401) throw new Error('DEEPSEEK_UNAUTHORIZED');
+          if (response.status >= 500) throw new Error(`DEEPSEEK_SERVER_ERROR_${response.status}`);
+          throw new Error(`DEEPSEEK_HTTP_ERROR_${response.status}`);
+        }
+
+        const data: any = await response.json();
+        const choice = data.choices?.[0];
+        const message = choice?.message;
+        const rawOutput = message?.content;
+        const usage = data.usage || {};
+        totalTokens += usage.total_tokens || 0;
+        finalPromptTokens = usage.prompt_tokens || finalPromptTokens;
+        finalCompletionTokens = usage.completion_tokens || finalCompletionTokens;
+
+        // Check for Tool Calls (OpenAI-compatible function calling)
+        if (message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0 && toolExecutor && currentTurn <= maxToolTurns) {
+          messages.push(message);
+
+          for (const toolCall of message.tool_calls) {
+            const functionName = toolCall.function?.name;
+            let args: Record<string, any> = {};
+            try {
+              args = JSON.parse(toolCall.function?.arguments || '{}');
+            } catch (e) {
+              args = {};
+            }
+
+            const actionReq: ActionRequest = {
+              tool: functionName,
+              arguments: args,
+              callId: toolCall.id,
+            };
+
+            const execResult = await toolExecutor.execute(actionReq, context.channel);
+            messages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(execResult),
+            });
+          }
+
+          // Continue tool calling loop to let DeepSeek incorporate tool outputs
+          continue;
+        }
+
+        // Final Response parsing
+        if (!rawOutput || typeof rawOutput !== 'string' || rawOutput.trim().length === 0) {
+          throw new Error('DEEPSEEK_EMPTY_RESPONSE: Model returned an empty content payload.');
+        }
+
+        const parsed = parseBrainOutput(rawOutput);
+        if (!parsed.success) {
+          const isJsonSyntax = parsed.error?.includes('Malformed JSON');
+          const errorCode = isJsonSyntax ? 'DEEPSEEK_INVALID_JSON' : 'DEEPSEEK_INVALID_SCHEMA';
+
+          logger.log({
+            event: `DeepSeek Output Rejected (${errorCode})`,
+            channelId: context.channel.id,
+            actionType: 'BRAIN_EVALUATION',
+            decision: 'CONTROLLED_ERROR',
+            success: false,
+            aiUsed: true,
+            tokensUsed: totalTokens,
+            durationMs: Date.now() - startTime,
+            error: `${errorCode}: ${parsed.error}`,
+          });
+
+          if (this.config.allowHeuristicFallback) {
+            return {
+              decision: this.heuristicEvaluation(context, promptInstruction),
+              aiUsed: false,
+              tokensUsed: totalTokens,
+              error: `${errorCode}: ${parsed.error}`,
+              tokenDetails: { promptTokens: finalPromptTokens, completionTokens: finalCompletionTokens, totalTokens },
+            };
+          }
+
+          return {
+            decision: {
+              decision: 'ignore',
+              action: 'ignore',
+              tone: 'clever',
+              messages: [],
+              reasoning: `Controlled rejection due to invalid brain output: ${parsed.error}`,
+            },
+            aiUsed: true,
+            tokensUsed: totalTokens,
+            raw: rawOutput,
+            error: `${errorCode}: ${parsed.error}`,
+            tokenDetails: { promptTokens: finalPromptTokens, completionTokens: finalCompletionTokens, totalTokens },
+          };
+        }
+
+        const validDecision = parsed.data!;
+        const proposedTools = validDecision.actionRequests?.map((a) => a.tool) || validDecision.tool_calls?.map((t) => t.name) || [];
+
+        this.recordCircuitBreakerSuccess();
+        this.lastAiCallTimestamp = Date.now();
+        this.lastAiResult = 'REAL_AI';
+        this.lastTokens = totalTokens;
+        this.totalTokensUsed += totalTokens;
+        this.totalAiCalls++;
+        this.lastLatencyMs = Date.now() - startTime;
+        this.lastError = undefined;
+
+        logger.log({
+          event: 'DeepSeek Evaluation Succeeded',
+          channelId: context.channel.id,
+          actionType: 'BRAIN_EVALUATION',
+          decision: validDecision.decision,
+          success: true,
           aiUsed: true,
-          tokensUsed,
+          tokensUsed: totalTokens,
+          durationMs: Date.now() - startTime,
+          details: `Model: ${this.config.model}, Action: ${validDecision.action}, Tone: ${validDecision.tone}, Proposed Tools: [${proposedTools.join(', ')}], Tokens: ${totalTokens}`,
+        });
+
+        return {
+          decision: validDecision,
+          aiUsed: true,
+          tokensUsed: totalTokens,
           raw: rawOutput,
-          error: `${errorCode}: ${parsed.error}`,
-          tokenDetails,
+          tokenDetails: { promptTokens: finalPromptTokens, completionTokens: finalCompletionTokens, totalTokens },
         };
       }
 
-      const validDecision = parsed.data!;
-      const proposedTools = validDecision.actionRequests?.map((a) => a.tool) || validDecision.tool_calls?.map((t) => t.name) || [];
-
-      // Safe Observability: Log success with structured summary
-      this.recordCircuitBreakerSuccess();
-      this.lastAiCallTimestamp = Date.now();
-      this.lastAiResult = 'REAL_AI';
-      this.lastTokens = tokensUsed;
-      this.totalTokensUsed += tokensUsed;
-      this.totalAiCalls++;
-      this.lastLatencyMs = Date.now() - startTime;
-      this.lastError = undefined;
-
-      logger.log({
-        event: 'DeepSeek Evaluation Succeeded',
-        channelId: context.channel.id,
-        actionType: 'BRAIN_EVALUATION',
-        decision: validDecision.decision,
-        success: true,
-        aiUsed: true,
-        tokensUsed,
-        durationMs: Date.now() - startTime,
-        details: `Model: ${this.config.model}, Action: ${validDecision.action}, Tone: ${validDecision.tone}, Proposed Tools: [${proposedTools.join(', ')}], Tokens: ${tokensUsed}`,
-      });
-
-      return {
-        decision: validDecision,
-        aiUsed: true,
-        tokensUsed,
-        raw: rawOutput,
-        tokenDetails,
-      };
+      throw new Error('DEEPSEEK_MAX_TOOL_TURNS_EXCEEDED');
     } catch (err: any) {
       const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError' || err.message?.toLowerCase().includes('timeout');
       const isInsufficientBalance =
@@ -620,17 +697,6 @@ export class DeepSeekAdapter {
       this.lastAiResult = this.config.allowHeuristicFallback ? 'FALLBACK' : 'ERROR';
 
       if (this.config.allowHeuristicFallback) {
-        logger.log({
-          event: `DeepSeek Error (Dev Heuristic Fallback Active: ${errorCode})`,
-          channelId: context.channel.id,
-          actionType: 'BRAIN_EVALUATION',
-          decision: 'FALLBACK',
-          success: false,
-          aiUsed: false,
-          durationMs,
-          error: errorCode,
-        });
-
         return {
           decision: this.heuristicEvaluation(context, promptInstruction),
           aiUsed: false,
@@ -638,20 +704,6 @@ export class DeepSeekAdapter {
           error: errorCode,
         };
       }
-
-      // Production mode: when DeepSeek fails, Foxty does NOT invent fake responses pretending they came from DeepSeek.
-      // It executes safe inaction.
-      logger.log({
-        event: `DeepSeek Unavailable (Inaction Enforced: ${errorCode})`,
-        channelId: context.channel.id,
-        actionType: 'BRAIN_EVALUATION',
-        decision: 'SILENCE',
-        success: false,
-        aiUsed: false,
-        durationMs,
-        error: errorCode,
-        details: `Model: ${this.config.model}, Duration: ${durationMs}ms`,
-      });
 
       return {
         decision: {
@@ -668,31 +720,11 @@ export class DeepSeekAdapter {
     }
   }
 
-  /**
-   * Constructs the authoritative system prompt instructing DeepSeek on Foxty's core identity,
-   * rules, Cherry Place context, and structured output formatting.
-   */
-  private buildSystemPrompt(): string {
-    return `Você é o cérebro conversacional do Foxty, uma raposa antropomórfica roxa (#8A2BE2) habitante do Cherry Place.
-Você é observador, inteligente, astuto, econômico com palavras, pontual, divertido, ocasionalmente teatral e levemente sarcástico.
-
-DIRETRIZES DE ESTILO E VOZ:
-- NUNCA fale como um chatbot de atendimento corporativo ou assistente genérico de IA (proibido usar: "Olá! Como posso te ajudar?", "Com certeza!", "Entendido.").
-- Respostas curtas, bem pontuadas e precisas. Se uma ou duas frases resolverem, não escreva parágrafos.
-- Conheça os habitantes principais do Cherry Place:
-  * Riely (Kazelyx): estilo ultra-comprimido, abreviações (vc, n, naum, tá), risadas rápidas (ksksks), marcadores (-&, :3, 🤭).
-  * Kris (OnlyKrisVK): estilo expansivo, detalhista, perguntas investigativas, exclamações teatrais (Não é possível..., mds, nossa, KKKK).
-- Foxty NUNCA imita o estilo deles; ele observa, nota contradições/desvios e provoca gentilmente.
-
-REGRAS DE PRIVACIDADE E SAKURAMAIL:
-- NUNCA invente, exponha ou publique conteúdo de cartas privadas do SakuraMail. O sistema SakuraMail é estritamente protegido.
-- NUNCA exponha senhas, tokens ou dados íntimos de ninguém.
-
-CONTRATO DE SOBERANIA DO CÓDIGO:
-- O código do bot é a autoridade máxima de permissões, limites de mensagens, cooldowns e ferramentas.
-- Você propõe ações através do formato estruturado abaixo. O Core validará e executará se permitidas.
-
-FORMATO DE RESPOSTA OBRIGATÓRIO (JSON PURO):
+  public buildSystemPrompt(): string {
+    const constitutionPrompt = this.knowledgeLoader.getRenderedConstitutionPrompt();
+    const outputSchemaPrompt = `================================================================================
+SECTION IV: MANDATORY STRUCTURED OUTPUT FORMAT (PURE JSON)
+================================================================================
 Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
 {
   "action": "respond" | "ignore" | "react" | "react_only" | "tool_call" | "respond_and_tool" | "do_nothing",
@@ -703,7 +735,7 @@ Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
   "mode": "single" | "burst",
   "tool_calls": [
     {
-      "name": "send_message" | "react" | "send_multiple_messages" | "save_memory" | "search_memory" | "get_channel_info" | "get_server_info" | "trigger_event",
+      "name": "send_message" | "reply_to_message" | "react_to_message" | "get_message" | "search_messages" | "get_recent_messages" | "edit_message" | "delete_message" | "send_file" | "save_memory" | "search_memory" | "get_channel_info" | "get_server_info" | "trigger_event",
       "arguments": {}
     }
   ],
@@ -718,12 +750,17 @@ Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
   ],
   "reason": "justificativa interna curta da raposa"
 }`;
+
+    return `${constitutionPrompt}\n\n${outputSchemaPrompt}`;
   }
 
   /**
-   * Prepares the structured context payload separating the 4 core dimensions.
+   * Prepares the structured context payload separating the 4 core dimensions
+   * with explicit message IDs, timestamps, and reply reference chains.
    */
-  private buildUserPayload(context: ContextPackage, instruction?: string): Record<string, any> {
+  public buildUserPayload(context: ContextPackage, instruction?: string): Record<string, any> {
+    const immediate = context.event?.immediateConversationWindow || context.recentMessages || [];
+
     return {
       identidade_foxty: context.identity || context.foxtyIdentity,
       localizacao_atual: {
@@ -743,20 +780,39 @@ Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
         protegido: context.currentLocation?.isProtected ?? context.location?.isProtected ?? context.channel.isProtected,
       },
       evento_atual: {
+        id: context.event?.messageId || immediate[immediate.length - 1]?.id || 'msg-current',
         tipo: context.event?.eventType || 'chat_message',
-        remetente: context.event?.author?.name || context.recentMessages[context.recentMessages.length - 1]?.author || 'user',
-        conteudo: context.event?.content || context.recentMessages[context.recentMessages.length - 1]?.content || '',
+        remetente: context.event?.author?.name || immediate[immediate.length - 1]?.author || 'user',
+        conteudo: context.event?.content || immediate[immediate.length - 1]?.content || '',
+        timestamp: context.event?.timestamp || immediate[immediate.length - 1]?.timestamp || new Date().toISOString(),
+        canal_id: context.channel.id,
+        mensagem_respondida_id: context.event?.replyToMessageId,
+        mensagem_referenciada: context.event?.repliedMessage
+          ? {
+              id: context.event.repliedMessage.id,
+              autor: context.event.repliedMessage.author,
+              conteudo: context.event.repliedMessage.content,
+              timestamp: context.event.repliedMessage.timestamp,
+            }
+          : null,
         mencoes_diretas: context.event?.mentions?.directMentionOfFoxty ?? false,
-        janela_recente: context.event?.recentConversationWindow || context.recentMessages.map((m) => ({
+        janela_imediata: immediate.map((m) => ({
+          id: m.id,
           autor: m.author,
-          mensagem: m.content,
+          conteudo: m.content,
+          timestamp: m.timestamp,
+          canal_id: m.channelId || context.channel.id,
+          bot: m.isBot ?? false,
+          responde_a_id: m.replyToMessageId,
         })),
       },
       memoria_e_estado: {
-        memorias_relevantes: (context.memoryAndState?.relevantMemories || context.relevantMemories || []).map((m) => ({
+        memorias_relevantes: (context.memoryAndState?.relevantMemories || context.relevantMemories || []).map((m: any) => ({
+          id: m.id,
           conteudo: m.content,
           tipo: m.type,
           seguro_para_brincadeiras: m.safeForTeasing,
+          usuario_alvo: m.targetUser,
         })),
         estado_foxty: context.memoryAndState?.foxtyState || context.foxtyState,
         participantes: context.participants,
@@ -774,7 +830,7 @@ Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
 
   // Persona heuristic fallback when API key is not configured or in offline test mode
   private heuristicEvaluation(context: ContextPackage, instruction?: string): BrainDecision {
-    const recent = context.recentMessages;
+    const recent = context.event?.immediateConversationWindow || context.recentMessages;
     const lastMsg = recent[recent.length - 1];
     const content = (lastMsg?.content || instruction || '').toLowerCase();
 
@@ -880,20 +936,6 @@ Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
       };
     }
 
-    if (content.includes('allay') || content.includes('galinha')) {
-      return {
-        decision: 'respond',
-        action: 'respond',
-        tone: 'clever',
-        messages: [
-          'os Allays continuam voando em círculos.',
-          'só avisando que alguém deixou a cerca entreaberta ontem.',
-        ],
-        mode: 'burst',
-        reactions: ['👀'],
-      };
-    }
-
     // Status or identity inquiries
     if (content.includes('quem é você') || content.includes('foxty') || content.includes('status')) {
       return {
@@ -950,4 +992,3 @@ export async function testDeepSeekConnection(adapter?: DeepSeekAdapter): Promise
   const defaultAdapter = new DeepSeekAdapter(config.deepSeek);
   return defaultAdapter.testDeepSeekConnection();
 }
-

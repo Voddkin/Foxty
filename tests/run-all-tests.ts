@@ -16,6 +16,11 @@ import { runDeepSeekBrainTestSuite } from './deepseek-brain.test.js';
 import { runDiscordIntegrationTestSuite } from './test_discord_integration.js';
 import { runPersistenceIntegrationTestSuite } from './test_persistence_integration.js';
 import { runDeepSeekCircuitBreakerTestSuite } from './test_deepseek_circuit_breaker.js';
+import { runRuntimeKnowledgeTestSuite } from './test_runtime_knowledge.js';
+import { runFirestoreMemoryTestSuite } from './test_firestore_memory.js';
+import { runPhase3TestSuite } from './test_phase3_context_history_tools.js';
+import { runPhase4TestSuite } from './phase4-autonomy-suite.js';
+import { runPhase5AuditSuite } from './phase5-integration-audit.js';
 
 let passed = 0;
 let failed = 0;
@@ -302,6 +307,45 @@ async function runTestSuite() {
     failed += circuitBreakerResults.failed;
   } else {
     passed += circuitBreakerResults.passed;
+  }
+
+  // 21. Runtime Knowledge & 11 Canonical Documents Prompt Constitution Verification
+  const runtimeKnowledgeResults = await runRuntimeKnowledgeTestSuite();
+  if (runtimeKnowledgeResults.failed > 0) {
+    failed += runtimeKnowledgeResults.failed;
+  } else {
+    passed += runtimeKnowledgeResults.passed;
+  }
+
+  // 22. Real Firestore Persistent Memory & Contextual Retrieval Verification
+  try {
+    await runFirestoreMemoryTestSuite();
+  } catch (firestoreErr: any) {
+    failed++;
+  }
+
+  // 23. Phase 3: Context Layer, Multi-tier History, References & Extended Tools
+  const phase3Results = await runPhase3TestSuite();
+  if (phase3Results.failed > 0) {
+    failed += phase3Results.failed;
+  } else {
+    passed += phase3Results.passed;
+  }
+
+  // 24. Phase 4: Autonomous Observation Loop, Multi-level Cooldowns & Idempotency
+  const phase4Results = await runPhase4TestSuite();
+  if (phase4Results.failed > 0) {
+    failed += phase4Results.failed;
+  } else {
+    passed += phase4Results.passed;
+  }
+
+  // 25. Phase 5: Final System Integration & Telemetry Audit Suite
+  const phase5Results = await runPhase5AuditSuite();
+  if (phase5Results.failed > 0) {
+    failed += phase5Results.failed;
+  } else {
+    passed += phase5Results.passed;
   }
 
   console.log('\n=============================================');

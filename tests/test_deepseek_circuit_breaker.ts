@@ -31,7 +31,7 @@ export async function runDeepSeekCircuitBreakerTestSuite(): Promise<{ passed: nu
     const adapter = new DeepSeekAdapter({
       apiKey: 'test-key',
       baseUrl: 'https://api.deepseek.com',
-      model: 'deepseek-flash',
+      model: 'deepseek-chat',
     });
     const state = adapter.getCircuitBreakerState();
     assert.strictEqual(state.state, 'CLOSED');
@@ -52,7 +52,7 @@ export async function runDeepSeekCircuitBreakerTestSuite(): Promise<{ passed: nu
     const adapter = new DeepSeekAdapter({
       apiKey: 'test-key-402',
       baseUrl: 'https://api.deepseek.com',
-      model: 'deepseek-flash',
+      model: 'deepseek-chat',
       fetchFn: mock402Fetch,
       allowHeuristicFallback: false,
     });
@@ -119,7 +119,7 @@ export async function runDeepSeekCircuitBreakerTestSuite(): Promise<{ passed: nu
     const adapter = new DeepSeekAdapter({
       apiKey: 'test-key',
       baseUrl: 'https://api.deepseek.com',
-      model: 'deepseek-flash',
+      model: 'deepseek-chat',
     });
 
     // Manually trip with a 500ms cooldown for fast testing
@@ -158,7 +158,7 @@ export async function runDeepSeekCircuitBreakerTestSuite(): Promise<{ passed: nu
     const adapter = new DeepSeekAdapter({
       apiKey: 'test-key',
       baseUrl: 'https://api.deepseek.com',
-      model: 'deepseek-flash',
+      model: 'deepseek-chat',
       fetchFn: mockDynamicFetch,
     });
 
@@ -184,7 +184,7 @@ export async function runDeepSeekCircuitBreakerTestSuite(): Promise<{ passed: nu
     const adapter = new DeepSeekAdapter({
       apiKey: process.env.DEEPSEEK_API_KEY || undefined,
       baseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
-      model: process.env.DEEPSEEK_MODEL || 'deepseek-flash',
+      model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
     });
 
     const result = await adapter.testDeepSeekConnection();

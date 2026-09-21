@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { CoreHeader } from './components/CoreHeader.js';
 import { PersonalityPanel } from './components/PersonalityPanel.js';
+import { RuntimeKnowledgePanel } from './components/RuntimeKnowledgePanel.js';
 import { PipelineSimulator } from './components/PipelineSimulator.js';
 import { EventEnginePanel } from './components/EventEnginePanel.js';
 import { SakuraMailBridgePanel } from './components/SakuraMailBridgePanel.js';
@@ -65,6 +66,9 @@ export default function App() {
 
         {/* Personality State Vectors */}
         <PersonalityPanel state={status?.state} />
+
+        {/* Runtime Knowledge & Canonical Constitution (11 Documents Prefix Injection) */}
+        <RuntimeKnowledgePanel onKnowledgeReloaded={fetchStatus} />
 
         {/* Server Map Canonical Topology Validator (New Diagnostic Module) */}
         <ServerMapValidatorPanel onRefreshTrigger={fetchStatus} />

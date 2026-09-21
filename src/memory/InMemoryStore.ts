@@ -1,5 +1,5 @@
 import { MemoryItem } from '../types.js';
-import { IMemoryStore, MemorySearchOptions, MemoryHealth } from './MemoryStore.js';
+import { IMemoryStore, MemorySearchOptions, MemoryHealth, MemoryItemInput } from './MemoryStore.js';
 
 export class InMemoryStore implements IMemoryStore {
   private store: Map<string, MemoryItem> = new Map();
@@ -12,13 +12,25 @@ export class InMemoryStore implements IMemoryStore {
     }
   }
 
-  public async save(item: Omit<MemoryItem, 'id' | 'createdAt'> & { id?: string }): Promise<MemoryItem> {
+  public async save(item: MemoryItemInput): Promise<MemoryItem> {
     const id = item.id || `mem-${Math.random().toString(36).substring(2, 9)}`;
     const createdAt = new Date().toISOString();
     const memory: MemoryItem = {
-      ...item,
       id,
+      content: item.content,
+      type: item.type,
+      importance: typeof item.importance === 'number' ? item.importance : 0.8,
+      confidence: typeof item.confidence === 'number' ? item.confidence : 0.9,
+      source: item.source || 'system',
+      targetUser: item.targetUser,
       createdAt,
+      lastConfirmed: item.lastConfirmed || createdAt,
+      expiresAt: item.expiresAt,
+      safeForTeasing: item.safeForTeasing ?? true,
+      retention: item.retention || 'permanent',
+      tags: Array.isArray(item.tags) ? item.tags : [],
+      scope: item.scope || 'cherry_place',
+      metadata: item.metadata || {},
     };
     this.store.set(id, memory);
     return memory;
@@ -106,6 +118,8 @@ export class InMemoryStore implements IMemoryStore {
       provider: 'in-memory',
       connected: true,
       available: true,
+      readOk: true,
+      writeOk: true,
       readWriteOk: true,
       recordCount: this.store.size,
       totalRecords: this.store.size,

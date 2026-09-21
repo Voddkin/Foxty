@@ -12,6 +12,9 @@ import {
   SemanticLocationContext,
 } from '../types.js';
 import { IMemoryStore } from '../memory/MemoryStore.js';
+import { ContextualRetriever, defaultContextualRetriever } from '../memory/ContextualRetriever.js';
+import { RetrievalCoordinator } from '../memory/RetrievalCoordinator.js';
+import { HistoryManager } from './HistoryManager.js';
 import {
   getSemanticLocationContext,
   getChannelById,
@@ -20,20 +23,33 @@ import {
 } from '../config/cherryPlaceModel.js';
 
 export interface ContextBuilderOptions {
+  immediateHistoryLimit?: number;
   recentHistoryLimit?: number;
   memoryLimit?: number;
+  retriever?: ContextualRetriever;
+  retrievalCoordinator?: RetrievalCoordinator;
 }
 
 export class ContextBuilder {
+  private immediateHistoryLimit: number;
   private recentHistoryLimit: number;
   private memoryLimit: number;
+  private retriever: ContextualRetriever;
+  private retrievalCoordinator: RetrievalCoordinator;
 
   constructor(
     private memoryStore: IMemoryStore,
     options: ContextBuilderOptions = {}
   ) {
-    this.recentHistoryLimit = options.recentHistoryLimit ?? 6;
-    this.memoryLimit = options.memoryLimit ?? 4;
+    this.immediateHistoryLimit = options.immediateHistoryLimit ?? 15;
+    this.recentHistoryLimit = options.recentHistoryLimit ?? 50;
+    this.memoryLimit = options.memoryLimit ?? 5;
+    this.retriever = options.retriever ?? defaultContextualRetriever;
+    this.retrievalCoordinator = options.retrievalCoordinator ?? new RetrievalCoordinator(this.memoryStore);
+  }
+
+  public setImmediateHistoryLimit(limit: number): void {
+    this.immediateHistoryLimit = Math.max(1, limit);
   }
 
   public setRecentHistoryLimit(limit: number): void {
@@ -42,6 +58,14 @@ export class ContextBuilder {
 
   public setMemoryLimit(limit: number): void {
     this.memoryLimit = Math.max(0, limit);
+  }
+
+  public setRetriever(retriever: ContextualRetriever): void {
+    this.retriever = retriever;
+  }
+
+  public setRetrievalCoordinator(coordinator: RetrievalCoordinator): void {
+    this.retrievalCoordinator = coordinator;
   }
 
   public async buildContext(params: {
@@ -53,7 +77,8 @@ export class ContextBuilder {
     event?: FoxtyEvent | null;
     availableTools: string[];
     isDirectMention?: boolean;
-    repliedMessage?: { author: string; content: string } | null;
+    repliedMessage?: { id?: string; author: string; content: string; timestamp?: string } | null;
+    historyManager?: HistoryManager;
   }): Promise<ContextPackage> {
     const {
       channel,
@@ -65,6 +90,7 @@ export class ContextBuilder {
       availableTools,
       isDirectMention = false,
       repliedMessage = null,
+      historyManager,
     } = params;
 
     // 1. Resolve Canonical Semantic Location Context
@@ -152,7 +178,15 @@ export class ContextBuilder {
       isProtected: location.isProtected,
     };
 
-    // 4. Build Explicit Section 3: Evento Atual
+    // 4. Build Multi-tier Message History
+    // A. Immediate Window (10-20 messages)
+    const immediateMessages =
+      recentMessages && recentMessages.length > 0
+        ? recentMessages.slice(-this.immediateHistoryLimit)
+        : historyManager
+        ? historyManager.getImmediateWindow(channel.id, this.immediateHistoryLimit)
+        : [];
+
     const content = currentMessage?.content || '';
     const otherMentions: string[] = [];
     const mentionMatches = content.match(/<@!?(\d+)>|@(\w+)/g);
@@ -164,54 +198,73 @@ export class ContextBuilder {
       });
     }
 
-    const conversationWindow = recentMessages
-      .slice(-this.recentHistoryLimit)
-      .map((m) => ({
-        author: m.author,
-        content: m.content,
-        timestamp: m.timestamp,
-      }));
-
     const eventContext: CurrentEventContext = {
       eventType: isDirectMention
         ? 'direct_mention'
         : event
         ? 'scheduled_tick'
         : 'chat_message',
+      messageId: currentMessage?.id || `msg-${Date.now()}`,
       author: {
         name: currentMessage?.author || 'system',
         isBot: currentMessage?.isBot ?? false,
       },
       content,
-      repliedMessage,
+      timestamp: currentMessage?.timestamp || new Date().toISOString(),
+      replyToMessageId: currentMessage?.replyToMessageId,
+      repliedMessage: repliedMessage || currentMessage?.repliedMessage || null,
       mentions: {
         directMentionOfFoxty: isDirectMention,
         otherMentions,
       },
-      recentConversationWindow: conversationWindow,
+      immediateConversationWindow: immediateMessages,
+      recentConversationWindow: immediateMessages.map((m) => ({
+        id: m.id,
+        author: m.author,
+        content: m.content,
+        timestamp: m.timestamp,
+        replyToMessageId: m.replyToMessageId,
+      })),
     };
 
     // 5. Build Explicit Section 4: Memória e Estado
     const participantsSet = new Set<string>();
-    recentMessages.forEach((m) => participantsSet.add(m.author));
+    immediateMessages.forEach((m) => participantsSet.add(m.author));
     if (currentMessage) {
       participantsSet.add(currentMessage.author);
     }
 
-    // Retrieve relevant memories adhering strictly to privacy (no private SakuraMail data)
-    const query = currentMessage ? currentMessage.content : channel.name;
+    // Infer speaker identity (Kris / Riely / Other) for contextual boosting
+    let targetUser: 'Kris' | 'Riely' | 'Other' | undefined;
+    if (currentMessage?.author) {
+      const authorLower = currentMessage.author.toLowerCase();
+      if (authorLower.includes('kris') || authorLower.includes('onlykris')) targetUser = 'Kris';
+      else if (authorLower.includes('riely') || authorLower.includes('kazelyx')) targetUser = 'Riely';
+    }
+
     const isCorrespondenceArea = location.isProtected || location.category.toLowerCase().includes('correspond');
-    const relevantMemories = await this.memoryStore.search(query, {
-      safeForTeasingOnly: !isCorrespondenceArea,
+
+    // Advanced contextual memory retrieval via RetrievalCoordinator
+    const scoredMemories = await this.retrievalCoordinator.retrieve({
+      currentMessage: {
+        content: currentMessage?.content || '',
+        author: currentMessage?.author || '',
+        channelId: channel.id,
+      },
+      recentHistory: immediateMessages,
+      targetUser,
       limit: this.memoryLimit,
+      safeForTeasingRequired: !isCorrespondenceArea,
     });
 
+    const relevantMemories = scoredMemories.map((sm) => sm.memory);
+
     const memoryAndState: MemoryAndStateContext = {
-      relevantMemories: relevantMemories.map((m) => ({
-        content: m.content,
-        type: m.type,
-        safeForTeasing: m.safeForTeasing,
-        targetUser: m.targetUser,
+      relevantMemories: scoredMemories.map((sm) => ({
+        content: sm.memory.content,
+        type: sm.memory.type,
+        safeForTeasing: sm.memory.safeForTeasing,
+        targetUser: sm.memory.targetUser,
       })),
       foxtyState: state,
       participants: Array.from(participantsSet),
@@ -232,7 +285,7 @@ export class ContextBuilder {
       event: eventContext,
       memoryAndState,
       participants: Array.from(participantsSet),
-      recentMessages: recentMessages.slice(-this.recentHistoryLimit),
+      recentMessages: immediateMessages,
       relevantMemories,
       behavioralObservations: observations,
       foxtyState: state,
@@ -241,5 +294,3 @@ export class ContextBuilder {
     };
   }
 }
-
-

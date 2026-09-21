@@ -8,6 +8,7 @@ import {
   MemoryItem,
   SakuraMailAbstractEvent,
   ServerMapValidationReport,
+  RuntimeKnowledgeStatus,
 } from '../types.js';
 import {
   FoxtyConfig,
@@ -16,9 +17,11 @@ import {
   getChannelById,
 } from '../config/index.js';
 import { ContextBuilder } from './ContextBuilder.js';
+import { HistoryManager } from './HistoryManager.js';
 import { StateManager } from './StateManager.js';
 import { Logger, logger } from './Logger.js';
 import { IMemoryStore, createDefaultMemoryStore, MemoryHealth } from '../memory/index.js';
+import { RetrievalCoordinator } from '../memory/RetrievalCoordinator.js';
 import { BehavioralAnalyzer } from '../behavior/BehavioralAnalyzer.js';
 import { PersonalityEngine } from '../personality/PersonalityEngine.js';
 import { EventEngine } from '../events/EventEngine.js';
@@ -33,6 +36,11 @@ import {
   PreConsultationDecision,
 } from '../policy/ChannelBehaviorPolicy.js';
 import { coreMetrics, CoreMetrics } from './FoxtyMetrics.js';
+import { ObservationQueue, ObservationCandidate } from '../behavior/ObservationQueue.js';
+import { AutonomyBudgetManager } from '../behavior/AutonomyBudgetManager.js';
+import { ObservationPreFilter } from '../behavior/ObservationPreFilter.js';
+import { ObservationEvaluator } from '../behavior/ObservationEvaluator.js';
+import { ReactionDiversityPolicy } from '../behavior/ReactionDiversityPolicy.js';
 
 export interface GeneralHealthStatus {
   status: 'ok' | 'degraded' | 'unhealthy';
@@ -45,6 +53,7 @@ export interface GeneralHealthStatus {
   memory: 'connected' | 'degraded' | 'error';
   sakuramail: 'connected' | 'disabled';
   metrics: CoreMetrics;
+  knowledge?: RuntimeKnowledgeStatus;
 }
 
 export interface InteractionResult {
@@ -59,6 +68,8 @@ export interface InteractionResult {
 
 export class FoxtyCore {
   private memoryStore: IMemoryStore;
+  private historyManager: HistoryManager;
+  private retrievalCoordinator: RetrievalCoordinator;
   private stateManager: StateManager;
   private behavioralAnalyzer: BehavioralAnalyzer;
   private personalityEngine: PersonalityEngine;
@@ -71,8 +82,14 @@ export class FoxtyCore {
   private channelBehaviorPolicy: ChannelBehaviorPolicy;
   private serverMapValidator: ServerMapValidator;
   private discordHandler?: DiscordActionHandler;
-  private recentMessagesBuffer: Map<string, ChatMessage[]> = new Map();
   private startTime: number = Date.now();
+
+  // Phase 4: Observation & Autonomy Loop
+  private observationQueue: ObservationQueue;
+  private budgetManager: AutonomyBudgetManager;
+  private observationPreFilter: ObservationPreFilter;
+  private observationEvaluator: ObservationEvaluator;
+  private reactionDiversityPolicy: ReactionDiversityPolicy;
 
   constructor(private config: FoxtyConfig, customMemoryStore?: IMemoryStore) {
     this.memoryStore =
@@ -81,12 +98,23 @@ export class FoxtyCore {
       createDefaultMemoryStore({
         provider: config.memoryProvider,
       });
+    this.historyManager = new HistoryManager(200);
+    this.retrievalCoordinator = new RetrievalCoordinator(this.memoryStore);
     this.stateManager = new StateManager(config.defaultState);
     this.behavioralAnalyzer = new BehavioralAnalyzer();
     this.personalityEngine = new PersonalityEngine();
     this.channelBehaviorPolicy = new ChannelBehaviorPolicy();
     this.eventEngine = new EventEngine(config.globalEventCooldownMinutes);
-    this.contextBuilder = new ContextBuilder(this.memoryStore);
+
+    // Initialize Phase 4 Autonomy Stack
+    this.observationQueue = new ObservationQueue();
+    this.budgetManager = new AutonomyBudgetManager();
+    this.observationPreFilter = new ObservationPreFilter(this.budgetManager);
+    this.observationEvaluator = new ObservationEvaluator(this.budgetManager);
+    this.reactionDiversityPolicy = new ReactionDiversityPolicy();
+    this.contextBuilder = new ContextBuilder(this.memoryStore, {
+      retrievalCoordinator: this.retrievalCoordinator,
+    });
     this.serverMapValidator = new ServerMapValidator();
     this.deepSeekAdapter = new DeepSeekAdapter(
       config.deepSeek || {
@@ -101,7 +129,8 @@ export class FoxtyCore {
       undefined,
       this.memoryStore,
       this.eventEngine,
-      () => this.config.channels
+      () => this.config.channels,
+      this.historyManager
     );
     this.sakuraMailBridge = new SakuraMailBridge();
 
@@ -114,6 +143,14 @@ export class FoxtyCore {
       durationMs: 0,
       details: `Test Mode: ${config.testMode}, Channels configured: ${config.channels.length}`,
     });
+  }
+
+  public getHistoryManager(): HistoryManager {
+    return this.historyManager;
+  }
+
+  public getRetrievalCoordinator(): RetrievalCoordinator {
+    return this.retrievalCoordinator;
   }
 
   public setDiscordActionHandler(handler: DiscordActionHandler): void {
@@ -137,68 +174,11 @@ export class FoxtyCore {
       }
     }
 
-    const snapshotToValidate = actualSnapshot || ServerMapValidator.getCanonicalSnapshot();
-    const report = this.serverMapValidator.validate(snapshotToValidate);
-
-    logger.log({
-      event: `Server Map Audit Executed: ${report.status}`,
-      actionType: 'SERVER_MAP_AUDIT',
-      decision: report.status,
-      success: report.status !== 'CRITICAL_DIVERGENCES',
-      aiUsed: false,
-      durationMs: 0,
-      details: `Compliance Score: ${report.metrics.complianceScore}%, Matched Channels: ${report.metrics.matchedChannels}/${report.metrics.totalExpectedChannels}, Findings: ${report.allFindings.length}`,
-    });
-
-    return report;
-  }
-
-  public getMemoryStore(): IMemoryStore {
-    return this.memoryStore;
-  }
-
-  public getStateManager(): StateManager {
-    return this.stateManager;
-  }
-
-  public getEventEngine(): EventEngine {
-    return this.eventEngine;
-  }
-
-  public getSakuraMailBridge(): SakuraMailBridge {
-    return this.sakuraMailBridge;
-  }
-
-  public getChannelBehaviorPolicy(): ChannelBehaviorPolicy {
-    return this.channelBehaviorPolicy;
-  }
-
-  public handleSakuraMailEvent(raw: SakuraMailRawInput): {
-    accepted: boolean;
-    abstractEvent?: SakuraMailAbstractEvent;
-    privacyWarning?: string;
-  } {
-    return this.sakuraMailBridge.ingestEvent(raw);
-  }
-
-  public getConfig(): FoxtyConfig {
-    return this.config;
-  }
-
-  public getChannelById(id: string): ChannelInfo | undefined {
-    return this.config.channels.find((c: ChannelInfo) => c.id === id);
-  }
-
-  public getDefaultChannel(): ChannelInfo {
-    return this.config.channels[0];
+    return this.serverMapValidator.validate(actualSnapshot);
   }
 
   public getDeepSeekAdapter(): DeepSeekAdapter {
     return this.deepSeekAdapter;
-  }
-
-  public getContextBuilder(): ContextBuilder {
-    return this.contextBuilder;
   }
 
   public getToolRegistry(): ToolRegistry {
@@ -209,56 +189,80 @@ export class FoxtyCore {
     return this.toolExecutor;
   }
 
-  public getMetrics(): Readonly<CoreMetrics> {
-    return coreMetrics.getSnapshot();
+  public getMemoryStore(): IMemoryStore {
+    return this.memoryStore;
   }
 
-  public async getMemoryHealth(): Promise<MemoryHealth> {
-    return this.memoryStore.getHealth();
+  public getStateManager(): StateManager {
+    return this.stateManager;
   }
 
-  public async getDeepSeekHealth(): Promise<DeepSeekDiagnostic> {
-    return this.deepSeekAdapter.getDiagnosticStatus();
+  public getSakuraMailBridge(): SakuraMailBridge {
+    return this.sakuraMailBridge;
+  }
+
+  public getContextBuilder(): ContextBuilder {
+    return this.contextBuilder;
+  }
+
+  public getBehavioralAnalyzer(): BehavioralAnalyzer {
+    return this.behavioralAnalyzer;
+  }
+
+  public getEventEngine(): EventEngine {
+    return this.eventEngine;
+  }
+
+  public getChannelBehaviorPolicy(): ChannelBehaviorPolicy {
+    return this.channelBehaviorPolicy;
+  }
+
+  public getConfig(): FoxtyConfig {
+    return this.config;
+  }
+
+  public getChannelById(channelId: string): ChannelInfo | undefined {
+    return this.config.channels.find((c) => c.id === channelId) || (getChannelById(channelId) as ChannelInfo | undefined);
   }
 
   public async getGeneralHealth(): Promise<GeneralHealthStatus> {
-    const memoryHealth = await this.getMemoryHealth();
-    const deepSeekDiag = await this.getDeepSeekHealth();
+    const memoryHealth: MemoryHealth = await this.memoryStore.getHealth();
+    const deepseekDiag = this.deepSeekAdapter.getDiagnostics();
+    const isDiscordConnected = this.discordHandler ? (this.discordHandler as any).isReady?.() ?? true : false;
+    const knowledgeStatus = this.deepSeekAdapter.getKnowledgeStatus();
 
-    let discordStatus: 'connected' | 'disconnected' | 'simulated' = 'disconnected';
-    if (this.discordHandler && typeof (this.discordHandler as any).auditConnection === 'function') {
-      try {
-        const audit = await (this.discordHandler as any).auditConnection();
-        discordStatus = audit.connected ? 'connected' : (this.config.testMode ? 'simulated' : 'disconnected');
-      } catch {
-        discordStatus = this.config.testMode ? 'simulated' : 'disconnected';
-      }
-    } else if (this.config.testMode) {
-      discordStatus = 'simulated';
-    }
-
-    let memoryStatus: 'connected' | 'degraded' | 'error' = 'connected';
-    if (!memoryHealth.connected || !memoryHealth.readWriteOk) {
-      memoryStatus = memoryHealth.connected ? 'degraded' : 'error';
-    }
-
-    let deepseekStatus: 'connected' | 'standby' | 'disabled' | 'error' = 'connected';
-    if (!deepSeekDiag.configured) {
+    let deepseekStatus: GeneralHealthStatus['deepseek'] = 'connected';
+    if (!deepseekDiag.configured) {
       deepseekStatus = 'disabled';
-    } else if (deepSeekDiag.status === 'standby_insufficient_balance') {
+    } else if (deepseekDiag.status === 'standby_insufficient_balance') {
       deepseekStatus = 'standby';
-    } else if (deepSeekDiag.status === 'error') {
+    } else if (deepseekDiag.status === 'error' || deepseekDiag.circuitBreaker === 'OPEN') {
       deepseekStatus = 'error';
     }
 
-    let overallStatus: 'ok' | 'degraded' | 'unhealthy' = 'ok';
-    if (memoryStatus === 'error' || (deepseekStatus === 'error' && !this.config.deepSeek?.allowHeuristicFallback)) {
+    const discordStatus: GeneralHealthStatus['discord'] =
+      this.config.discordToken && isDiscordConnected
+        ? 'connected'
+        : this.config.discordToken
+        ? 'disconnected'
+        : 'simulated';
+
+    const memoryStatus: GeneralHealthStatus['memory'] =
+      memoryHealth.connected && memoryHealth.readWriteOk
+        ? 'connected'
+        : memoryHealth.connected
+        ? 'degraded'
+        : 'error';
+
+    let overallStatus: GeneralHealthStatus['status'] = 'ok';
+    if (memoryStatus === 'error' || (this.config.discordToken && discordStatus === 'disconnected')) {
       overallStatus = 'unhealthy';
     } else if (
       deepseekStatus === 'standby' ||
-      deepseekStatus === 'disabled' ||
+      deepseekStatus === 'error' ||
       memoryStatus === 'degraded' ||
-      discordStatus === 'disconnected'
+      !knowledgeStatus.isComplete ||
+      knowledgeStatus.missingDocuments.length > 0
     ) {
       overallStatus = 'degraded';
     }
@@ -274,7 +278,28 @@ export class FoxtyCore {
       memory: memoryStatus,
       sakuramail: 'connected',
       metrics: coreMetrics.getSnapshot(),
+      knowledge: knowledgeStatus,
     };
+  }
+
+  public async getDeepSeekHealth(): Promise<any> {
+    return this.deepSeekAdapter.getDiagnostics();
+  }
+
+  public async getMemoryHealth(): Promise<MemoryHealth> {
+    return this.memoryStore.getHealth();
+  }
+
+  public getRuntimeKnowledgeStatus(): RuntimeKnowledgeStatus {
+    return this.deepSeekAdapter.getKnowledgeStatus();
+  }
+
+  public reloadRuntimeKnowledge(): RuntimeKnowledgeStatus {
+    return this.deepSeekAdapter.reloadRuntimeKnowledge();
+  }
+
+  public getInjectedConstitutionSummary(): string {
+    return this.deepSeekAdapter.getInjectedConstitutionSummary();
   }
 
   // ==========================================
@@ -287,7 +312,9 @@ export class FoxtyCore {
     messageId?: string;
     isBot?: boolean;
     isDirectMention?: boolean;
-    repliedMessage?: { author: string; content: string } | null;
+    replyToMessageId?: string;
+    repliedMessage?: { id?: string; author: string; content: string; timestamp?: string } | null;
+    dispatchToDiscord?: boolean;
   }): Promise<InteractionResult> {
     const startTime = Date.now();
     const {
@@ -296,7 +323,9 @@ export class FoxtyCore {
       content,
       isBot = false,
       isDirectMention = false,
+      replyToMessageId,
       repliedMessage = null,
+      dispatchToDiscord = true,
     } = params;
 
     // Ignore bot messages by default to prevent feedback loops
@@ -329,22 +358,29 @@ export class FoxtyCore {
       content,
       timestamp: new Date().toISOString(),
       isBot,
+      replyToMessageId,
+      repliedMessage: repliedMessage
+        ? {
+            id: repliedMessage.id || replyToMessageId,
+            author: repliedMessage.author,
+            content: repliedMessage.content,
+            timestamp: repliedMessage.timestamp,
+          }
+        : undefined,
     };
 
-    // Maintain recent messages buffer for channel
+    // Maintain channel history via HistoryManager
     coreMetrics.recordMessageObserved();
-    const buffer = this.recentMessagesBuffer.get(channelId) || [];
-    buffer.push(currentMessage);
-    if (buffer.length > 20) buffer.shift();
-    this.recentMessagesBuffer.set(channelId, buffer);
+    this.historyManager.addMessage(currentMessage);
+
+    const immediateMessages = this.historyManager.getImmediateWindow(channelId, 20);
 
     // 1. Behavioral Analysis with previous channel history
-    const previousHistory = buffer.slice(0, -1);
+    const previousHistory = immediateMessages.slice(0, -1);
     const observation = this.behavioralAnalyzer.analyze(author, content, previousHistory);
     const currentState = this.stateManager.getState();
 
     // 2. Authoritative Channel Behavior Policy Pre-Consultation Gate
-    // The Core MUST determine the policy before consulting DeepSeek.
     const policyEvaluation = this.channelBehaviorPolicy.evaluatePreConsultation({
       channel,
       isDirectMention,
@@ -415,23 +451,28 @@ export class FoxtyCore {
     const context = await this.contextBuilder.buildContext({
       channel,
       currentMessage,
-      recentMessages: buffer,
+      recentMessages: immediateMessages,
       observations: [observation],
       state: currentState,
       availableTools: this.toolRegistry.getAvailableTools(),
       isDirectMention,
-      repliedMessage,
+      repliedMessage: currentMessage.repliedMessage || repliedMessage,
+      historyManager: this.historyManager,
     });
 
     if (context.relevantMemories && context.relevantMemories.length > 0) {
       coreMetrics.recordMemoryRead(context.relevantMemories.length);
     }
 
-    // 5. DeepSeek Brain Evaluation (Only suggests behavior; does NOT authorize)
+    // 5. DeepSeek Brain Evaluation (Supports interactive tool calling loop)
     coreMetrics.recordBrainConsultation();
     const brainResult = await this.deepSeekAdapter.evaluate(
       context,
-      isDirectMention ? `User ${author} is directly addressing you: "${content}"` : undefined
+      isDirectMention ? `User ${author} is directly addressing you: "${content}"` : undefined,
+      {
+        toolExecutor: this.toolExecutor,
+        toolRegistry: this.toolRegistry,
+      }
     );
 
     if (brainResult.decision.decision === 'respond') {
@@ -447,8 +488,23 @@ export class FoxtyCore {
     // 6. Post-Evaluation Core Guardrails: DeepSeek only suggests; the Core enforces
     const toolResults: ToolExecutionResult[] = [];
 
+    // Check if the brain already requested an explicit message action (e.g. reply_to_message, send_message)
+    const hasExplicitMessageAction = brainResult.decision.actionRequests?.some(
+      (ar) => ar.tool === 'send_message' || ar.tool === 'reply_to_message' || ar.tool === 'send_multiple_messages'
+    );
+
+    // If explicit message tool was used but messages array is empty, mirror content for response consumers
+    if (hasExplicitMessageAction && (!brainResult.decision.messages || brainResult.decision.messages.length === 0)) {
+      const explicitMsg = brainResult.decision.actionRequests?.find(
+        (ar) => (ar.tool === 'reply_to_message' || ar.tool === 'send_message') && ar.arguments?.content
+      );
+      if (explicitMsg?.arguments?.content) {
+        brainResult.decision.messages = [explicitMsg.arguments.content];
+      }
+    }
+
     // 6a. Filter and execute messages according to channel policy burst and permissions
-    if (brainResult.decision.decision === 'respond' && brainResult.decision.messages.length > 0) {
+    if (dispatchToDiscord && !hasExplicitMessageAction && brainResult.decision.decision === 'respond' && brainResult.decision.messages.length > 0) {
       const allowedMessages = this.channelBehaviorPolicy.filterProposedMessages(
         brainResult.decision.messages,
         channel
@@ -513,9 +569,18 @@ export class FoxtyCore {
       }
 
       for (const req of approved) {
+        if (!dispatchToDiscord && (req.tool === 'send_message' || req.tool === 'reply_to_message' || req.tool === 'send_multiple_messages')) {
+          // Message delivery is handled directly by caller (e.g. Slash Command editReply)
+          continue;
+        }
+
         coreMetrics.recordToolExecution();
         const actionResult = await this.toolExecutor.execute(req, channel);
         toolResults.push(actionResult);
+
+        if (actionResult.success && (req.tool === 'send_message' || req.tool === 'reply_to_message' || req.tool === 'send_multiple_messages')) {
+          this.channelBehaviorPolicy.recordResponse(channel.id, Date.now());
+        }
       }
     }
 
@@ -550,7 +615,7 @@ export class FoxtyCore {
       }
     }
 
-    // Update state based on interaction (e.g. slight curiosity bump)
+    // Update state based on interaction
     this.stateManager.adjust({ curiosity: 0.02, energy: 0.01 });
 
     return {
@@ -576,7 +641,6 @@ export class FoxtyCore {
   }): Promise<{ reply: string; decision: BrainDecision; toolResults: ToolExecutionResult[] }> {
     const { subcommand, prompt, author, channelId } = params;
 
-    // Strict boundary: blocked channels prohibit any interactive presence
     if (isChannelBlocked(channelId)) {
       return {
         reply: '🦊 *Foxty permanece em silêncio e não intervém neste canal.*',
@@ -585,7 +649,6 @@ export class FoxtyCore {
       };
     }
 
-    // Subcommand: conexao / connection / audit-connection
     if (
       subcommand === 'conexao' ||
       subcommand === 'connection' ||
@@ -617,7 +680,6 @@ export class FoxtyCore {
       }
     }
 
-    // Subcommand: diagnostico / mapa / audit
     if (
       subcommand === 'diagnostico' ||
       subcommand === 'mapa' ||
@@ -631,57 +693,445 @@ export class FoxtyCore {
       const shortSummary =
         `🦊 **Diagnóstico do Mapa — Cherry Place** ${statusEmoji}\n` +
         `• **Status**: \`${report.status}\` | **Score**: **${report.metrics.complianceScore}%**\n` +
-        `• **Guild ID**: ${report.guildValidation.isGuildIdMatch ? '✅ Conforme' : '❌ Divergente'}\n` +
-        `• **Categorias**: ${report.metrics.matchedCategories}/${report.metrics.totalExpectedCategories} OK\n` +
-        `• **Canais**: ${report.metrics.matchedChannels}/${report.metrics.totalExpectedChannels} OK (Ausentes: ${report.metrics.missingChannels} | Inesperados: ${report.metrics.unexpectedChannelsCount})\n` +
-        `• **Achados**: ${report.allFindings.length} (${report.metrics.criticalErrorsCount} erros, ${report.metrics.warningsCount} alertas)\n` +
-        `\n*Dica: Abra o Dashboard Web para ver a árvore visual completa e exportar o relatório completo.*`;
+        `• **Canais Canônicos**: ${report.metrics.matchedChannels} correspondências exatas\n` +
+        `• **Canais Faltantes**: ${report.metrics.missingChannels} | **Canais Inesperados**: ${report.metrics.unexpectedChannelsCount}\n` +
+        `• **Categorias Faltantes**: ${report.metrics.missingCategories} | **Inesperadas**: ${report.metrics.unexpectedCategoriesCount}`;
 
       return {
         reply: shortSummary,
         decision: {
           decision: 'respond',
-          tone: 'pseudo_serious',
+          tone: 'clever',
           messages: [shortSummary],
         },
         toolResults: [],
       };
     }
 
-    // Subcommand: status
-    if (subcommand === 'status' || (!prompt && !subcommand)) {
-      const state = this.stateManager.getState();
+    if (subcommand === 'status') {
+      const health = await this.getGeneralHealth();
       const statusText =
-        `🦊 **Foxty Status** [Cherry Place]\n` +
-        `• **Humor**: ${(state.mood * 100).toFixed(0)}% | **Energia**: ${(state.energy * 100).toFixed(0)}%\n` +
-        `• **Curiosidade**: ${(state.curiosity * 100).toFixed(0)}% | **Caos**: ${(state.chaos * 100).toFixed(0)}%\n` +
-        `• **Teatralidade**: ${(state.drama * 100).toFixed(0)}% | **Economia**: ${((1 - state.talkativeness) * 100).toFixed(0)}%\n` +
-        `• *Observando silenciosamente o servidor...*`;
+        `🦊 **Foxty Status — Core Diagnostic**\n` +
+        `• Saúde Geral: \`${health.status.toUpperCase()}\` | Uptime: \`${health.uptime}s\`\n` +
+        `• DeepSeek Brain: \`${health.deepseek.toUpperCase()}\`\n` +
+        `• Memória: \`${health.memory.toUpperCase()}\` (${health.metrics.memoryReads} leituras, ${health.metrics.memoryWrites} gravações)\n` +
+        `• Discord: \`${health.discord.toUpperCase()}\`\n` +
+        `• Mensagens Observadas: \`${health.metrics.messagesObserved}\``;
 
       return {
         reply: statusText,
-        decision: { decision: 'respond', tone: 'clever', messages: [statusText] },
+        decision: {
+          decision: 'respond',
+          tone: 'clever',
+          messages: [statusText],
+        },
         toolResults: [],
       };
     }
 
-    // Direct invocation via prompt
-    const interaction = await this.handleMessage({
+    const content = prompt || 'Olá Foxty!';
+    const result = await this.handleMessage({
       channelId,
       author,
-      content: prompt || 'olá foxty',
+      content,
       isDirectMention: true,
     });
 
     const reply =
-      interaction.decision.messages.length > 0
-        ? interaction.decision.messages.join('\n')
-        : '🦊 *Foxty apenas observa com os olhos semicerrados.*';
+      result.decision.messages && result.decision.messages.length > 0
+        ? result.decision.messages.join('\n\n')
+        : '*(Foxty observa silenciosamente com um olhar curioso)* 🦊';
 
     return {
       reply,
-      decision: interaction.decision,
-      toolResults: interaction.toolResults,
+      decision: result.decision,
+      toolResults: result.toolResults,
     };
+  }
+
+  // ==========================================
+  // SakuraMail Handling (Strict Privacy Enforcement)
+  // ==========================================
+  public handleSakuraMailEvent(rawInput: any): {
+    accepted: boolean;
+    success: boolean;
+    abstractEvent?: SakuraMailAbstractEvent;
+    privacyWarning?: string;
+    reason?: string;
+  } {
+    const processResult = this.sakuraMailBridge.processEvent(rawInput);
+
+    if (!processResult.success || !processResult.event) {
+      return {
+        accepted: false,
+        success: false,
+        reason: processResult.privacyWarning || 'Failed to abstract SakuraMail event',
+      };
+    }
+
+    const event = processResult.event;
+
+    // Strict boundary: Only save sanitized abstract counters, never personal text
+    this.memoryStore.save({
+      content: `[SakuraMail Log] Evento de correspondência processado: ${event.type} para o usuário ${event.user}.`,
+      type: 'temporary',
+      importance: 0.3,
+      confidence: 1.0,
+      source: 'SakuraMailBridge',
+      safeForTeasing: false,
+      retention: 'session',
+      tags: ['sakuramail', 'abstract', 'privacy-safe'],
+    }).catch?.(() => {});
+
+    return {
+      accepted: true,
+      success: true,
+      abstractEvent: event,
+      privacyWarning: 'Letter body stripped to enforce privacy boundary (SakuraMail isolation).',
+    };
+  }
+
+  // ==========================================
+  // Phase 4: Autonomous Observation Loop Methods
+  // ==========================================
+
+  /**
+   * Passive message observation. Records state & updates history, evaluates pre-filter,
+   * and queues candidates without invoking DeepSeek directly.
+   */
+  public async observeMessage(params: {
+    channelId: string;
+    author: string;
+    content: string;
+    messageId?: string;
+    isBot?: boolean;
+    isDirectMention?: boolean;
+    replyToMessageId?: string;
+    repliedMessage?: { id?: string; author: string; content: string; timestamp?: string } | null;
+  }): Promise<{
+    queued: boolean;
+    relevance: number;
+    reason: string;
+    candidate?: ObservationCandidate;
+  }> {
+    const { channelId, author, content, isBot = false, isDirectMention = false } = params;
+    const channel = this.getChannelById(channelId) || {
+      id: channelId,
+      name: channelId,
+      category: 'General',
+      type: 'social',
+      isProtected: false,
+      allowSpontaneousEvents: true,
+      toneGuidance: 'Default context',
+    };
+
+    const currentMessage: ChatMessage = {
+      id: params.messageId || `msg-${Date.now()}`,
+      author,
+      channelId,
+      content,
+      timestamp: new Date().toISOString(),
+      isBot,
+      replyToMessageId: params.replyToMessageId,
+      repliedMessage: params.repliedMessage
+        ? {
+            id: params.repliedMessage.id || params.replyToMessageId,
+            author: params.repliedMessage.author,
+            content: params.repliedMessage.content,
+            timestamp: params.repliedMessage.timestamp,
+          }
+        : undefined,
+    };
+
+    // 1. Maintain channel history & update behavioral analyzer
+    coreMetrics.recordMessageObserved();
+    this.historyManager.addMessage(currentMessage);
+    const immediate = this.historyManager.getImmediateWindow(channelId, 20);
+    this.behavioralAnalyzer.analyze(author, content, immediate.slice(0, -1));
+
+    // 2. Run cheap, synchronous pre-filter check
+    const filterResult = this.observationPreFilter.evaluateMessage({
+      messageId: currentMessage.id,
+      channel,
+      author,
+      content,
+      timestamp: Date.now(),
+      isBot,
+      isDirectMention,
+      replyToMessageId: params.replyToMessageId,
+    });
+
+    if (filterResult.shouldQueue && filterResult.candidate) {
+      const candidate = this.observationQueue.addCandidate(filterResult.candidate);
+      return {
+        queued: true,
+        relevance: filterResult.relevance,
+        reason: filterResult.reason,
+        candidate,
+      };
+    }
+
+    return {
+      queued: false,
+      relevance: filterResult.relevance,
+      reason: filterResult.reason,
+    };
+  }
+
+  /**
+   * Executes a periodic observation evaluation cycle on pending candidates.
+   */
+  public async runObservationCycle(channelId?: string): Promise<InteractionResult | null> {
+    const pending = this.observationQueue.getPendingCandidates(channelId);
+    if (pending.length === 0) {
+      // Fallback: evaluate EventEngine for spontaneous events
+      return this.evaluateSpontaneousEventEngine(channelId);
+    }
+
+    const candidate = pending[0]; // Highest relevance
+    this.observationQueue.markProcessed(candidate.id);
+
+    const channel = this.getChannelById(candidate.channelId) || {
+      id: candidate.channelId,
+      name: candidate.channelId,
+      category: 'General',
+      type: 'social',
+      isProtected: false,
+      allowSpontaneousEvents: true,
+      toneGuidance: 'Default context',
+    };
+
+    const recentMessages = this.historyManager.getImmediateWindow(candidate.channelId, 25);
+
+    // Contextual candidate evaluation
+    const evalResult = this.observationEvaluator.evaluateCandidate({
+      candidate,
+      channel,
+      recentMessagesInChannel: recentMessages,
+    });
+
+    if (!evalResult.shouldIntervene) {
+      logger.log({
+        event: 'Observation Candidate Rejected (Silence)',
+        channelId: candidate.channelId,
+        actionType: 'OBSERVATION_EVAL',
+        decision: 'SILENCE',
+        success: true,
+        aiUsed: false,
+        durationMs: 0,
+        details: evalResult.reason,
+      });
+      return null;
+    }
+
+    // Deduplication / Idempotency check
+    const actionFingerprint = `${evalResult.proposedAction}::${candidate.messageId}`;
+    if (this.budgetManager.isDuplicate(candidate.messageId, actionFingerprint)) {
+      logger.log({
+        event: 'Observation Candidate Suppressed (Duplicate Idempotency)',
+        channelId: candidate.channelId,
+        actionType: 'IDEMPOTENCY_SUPPRESSION',
+        decision: 'SILENCE',
+        success: true,
+        aiUsed: false,
+        durationMs: 0,
+      });
+      return null;
+    }
+
+    // Build context with Observer Prompt
+    const currentState = this.stateManager.getState();
+    const currentMessage: ChatMessage = {
+      id: candidate.messageId,
+      author: candidate.author,
+      channelId: candidate.channelId,
+      content: candidate.content,
+      timestamp: new Date(candidate.timestamp).toISOString(),
+      isBot: false,
+    };
+
+    const contextPackage = await this.contextBuilder.buildContext({
+      channel,
+      currentMessage,
+      recentMessages,
+      observations: [],
+      state: currentState,
+      availableTools: this.toolRegistry.getAvailableTools(),
+      isDirectMention: false,
+      historyManager: this.historyManager,
+    });
+
+    const observerPromptInstruction =
+      'Você está observando esta conversa em segundo plano. Você NÃO foi mencionado diretamente. ' +
+      'Analise o contexto recente e decida se existe um motivo REAL e de alto valor para intervir agora, ou se deve permanecer em silêncio.\n' +
+      'Instruções de Decisão:\n' +
+      '- Se optar por não intervir, retorne a decisão "ignore" (esta deve ser a escolha mais comum e natural).\n' +
+      '- Se optar por intervir, escolha o modo apropriado: "respond" (mensagem simples), "reply_to_message" (para responder a uma mensagem anterior específica), "react" (usar um emoji pertinente), ou "burst" (2 a 3 mensagens curtas sequenciais).\n' +
+      '- Não seja chato ou hiperativo. Mantenha a postura de um residente observador em Cherry Place.';
+
+    coreMetrics.recordBrainConsultation();
+    const brainResult = await this.deepSeekAdapter.evaluate(
+      contextPackage,
+      observerPromptInstruction
+    );
+
+    this.budgetManager.recordAiUsage(brainResult.tokensUsed, 'RARE_AI');
+
+    // Silence decision
+    if (brainResult.decision.decision === 'ignore' || (!brainResult.decision.messages || brainResult.decision.messages.length === 0)) {
+      coreMetrics.recordSilence();
+      logger.log({
+        event: 'Foxty Observer Brain Chose Silence',
+        channelId: candidate.channelId,
+        actionType: 'OBSERVER_DECISION',
+        decision: 'SILENCE',
+        success: true,
+        aiUsed: brainResult.aiUsed,
+        durationMs: 0,
+        details: brainResult.decision.reasoning,
+      });
+
+      return {
+        decision: brainResult.decision,
+        toolResults: [],
+        state: currentState,
+        observations: [],
+        memoriesRetrieved: contextPackage.relevantMemories || [],
+        aiUsed: brainResult.aiUsed,
+        tokensUsed: brainResult.tokensUsed,
+      };
+    }
+
+    // Intervene decision
+    const toolResults: ToolExecutionResult[] = [];
+
+    // Reaction diversity
+    if (brainResult.decision.reactions && brainResult.decision.reactions.length > 0) {
+      const diverseEmoji = this.reactionDiversityPolicy.selectEmoji(
+        candidate.content,
+        brainResult.decision.tone,
+        candidate.channelId
+      );
+      brainResult.decision.reactions = [diverseEmoji];
+    }
+
+    // Burst cap (max 3 messages)
+    if (brainResult.decision.messages && brainResult.decision.messages.length > 3) {
+      brainResult.decision.messages = brainResult.decision.messages.slice(0, 3);
+    }
+
+    // Record action fingerprint & intervention cooldowns
+    this.budgetManager.recordActionFingerprint(candidate.messageId, actionFingerprint);
+    this.budgetManager.recordIntervention({
+      channelId: candidate.channelId,
+      userId: candidate.author,
+      interventionType: evalResult.proposedAction,
+    });
+    this.channelBehaviorPolicy.recordResponse(candidate.channelId, Date.now());
+
+    // Execute actions via ToolExecutor
+    if (evalResult.proposedAction === 'REPLY_TO_MESSAGE' || brainResult.decision.actionRequests?.some((a) => a.tool === 'reply_to_message')) {
+      const replyContent = brainResult.decision.messages[0] || 'Interessante observação...';
+      const execRes = await this.toolExecutor.execute(
+        {
+          tool: 'reply_to_message',
+          arguments: {
+            channel_id: candidate.channelId,
+            message_id: candidate.messageId,
+            content: replyContent,
+          },
+        },
+        channel
+      );
+      toolResults.push(execRes);
+    } else if (brainResult.decision.messages && brainResult.decision.messages.length > 0) {
+      for (const msg of brainResult.decision.messages) {
+        const execRes = await this.toolExecutor.execute(
+          {
+            tool: 'send_message',
+            arguments: {
+              channel_id: candidate.channelId,
+              content: msg,
+            },
+          },
+          channel
+        );
+        toolResults.push(execRes);
+      }
+    }
+
+    return {
+      decision: brainResult.decision,
+      toolResults,
+      state: currentState,
+      observations: [],
+      memoriesRetrieved: contextPackage.relevantMemories || [],
+      aiUsed: brainResult.aiUsed,
+      tokensUsed: brainResult.tokensUsed,
+    };
+  }
+
+  /**
+   * Spontaneous EventEngine evaluation integrated into the observation cycle.
+   */
+  public evaluateSpontaneousEventEngine(channelId?: string, now?: number): InteractionResult | null {
+    const channel = channelId
+      ? this.getChannelById(channelId)
+      : this.config.channels.find((c) => !c.isProtected && c.allowSpontaneousEvents);
+
+    if (!channel || !channel.allowSpontaneousEvents) return null;
+
+    const cdCheck = this.budgetManager.checkCooldowns({
+      channelId: channel.id,
+      interventionType: 'event',
+      now: now ?? Date.now(),
+    });
+    if (!cdCheck.allowed) return null;
+
+    const eventResult = this.eventEngine.triggerTestEvent(undefined, channel);
+    if (!eventResult.triggered || !eventResult.event) return null;
+
+    this.budgetManager.recordIntervention({
+      channelId: channel.id,
+      interventionType: 'event',
+    });
+
+    const messages = eventResult.event.payload?.quips || eventResult.event.payload?.burst || ['🦊 *Foxty observa silenciosamente.*'];
+
+    return {
+      decision: {
+        decision: 'respond',
+        tone: 'curious',
+        messages,
+        reasoning: `Spontaneous Event Engine triggered: ${eventResult.event.name}`,
+      },
+      toolResults: [],
+      state: this.stateManager.getState(),
+      observations: [],
+      memoriesRetrieved: [],
+      aiUsed: false,
+      tokensUsed: 0,
+    };
+  }
+
+  // Getters for Phase 4 components
+  public getObservationQueue(): ObservationQueue {
+    return this.observationQueue;
+  }
+
+  public getAutonomyBudgetManager(): AutonomyBudgetManager {
+    return this.budgetManager;
+  }
+
+  public getReactionDiversityPolicy(): ReactionDiversityPolicy {
+    return this.reactionDiversityPolicy;
+  }
+
+  public getObservationPreFilter(): ObservationPreFilter {
+    return this.observationPreFilter;
+  }
+
+  public getObservationEvaluator(): ObservationEvaluator {
+    return this.observationEvaluator;
   }
 }

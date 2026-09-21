@@ -87,6 +87,26 @@ export class SakuraMailBridge {
     };
   }
 
+  public processEvent(raw: any) {
+    const normInput: SakuraMailRawInput = {
+      type: raw.type || raw.eventType || 'letter_opened',
+      user: raw.user || raw.sender || 'Unknown',
+      channelId: raw.channelId,
+      content: raw.content || raw.rawContent,
+      body: raw.body,
+      letter_text: raw.letter_text,
+      subject: raw.subject,
+    };
+    const res = this.ingestEvent(normInput);
+    return {
+      success: res.accepted,
+      accepted: res.accepted,
+      event: res.abstractEvent,
+      abstractEvent: res.abstractEvent,
+      privacyWarning: res.privacyWarning,
+    };
+  }
+
   public getRecentAbstractEvents(): SakuraMailAbstractEvent[] {
     return [...this.abstractEventsHistory];
   }
