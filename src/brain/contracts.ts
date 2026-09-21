@@ -260,24 +260,27 @@ export function extractAndCleanJsonString(rawText: string): string {
   // 1. Strip reasoning / thinking tokens (e.g. <think>...</think>) from DeepSeek-R1 / Reasoner models
   cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
-  // 2. Extract content from markdown code block if present
+  // 2. Normalize curly quotes to standard quotes
+  cleaned = cleaned.replace(/[“”«»]/g, '"').replace(/[‘’]/g, "'");
+
+  // 3. Extract content from markdown code block if present
   const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (codeBlockMatch && codeBlockMatch[1]) {
     cleaned = codeBlockMatch[1].trim();
-  } else {
-    // Try to find the outermost JSON object { ... }
-    const firstBrace = cleaned.indexOf('{');
-    const lastBrace = cleaned.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
-    }
   }
 
-  // 3. Remove single line comments and multi-line comments
+  // 4. Always find the outermost JSON object { ... } or array [ ... ]
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  }
+
+  // 5. Remove single line comments and multi-line comments
   cleaned = cleaned.replace(/\/\/.*$/gm, '');
   cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
 
-  // 4. Remove trailing commas before closing braces/brackets
+  // 6. Remove trailing commas before closing braces/brackets
   cleaned = cleaned.replace(/,\s*([}\]])/g, '$1');
 
   return cleaned.trim();
@@ -287,34 +290,48 @@ export function extractAndCleanJsonString(rawText: string): string {
  * Robust JSON repair for common LLM syntax irregularities
  */
 function attemptRepairJson(str: string): any {
-  // First try direct parse
+  // 1. First try direct parse
   try {
     return JSON.parse(str);
   } catch {
-    // continue
+    // continue to repair
   }
 
   let repaired = str;
-  // Replace python-style booleans / none
+  // 2. Replace python-style booleans / none
   repaired = repaired.replace(/:\s*True\b/g, ': true');
   repaired = repaired.replace(/:\s*False\b/g, ': false');
   repaired = repaired.replace(/:\s*None\b/g, ': null');
 
-  // Fix unquoted keys { key: "value" } -> { "key": "value" }
+  // 3. Fix unquoted keys { key: "value" } -> { "key": "value" }
   repaired = repaired.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
 
-  // Fix single quotes around strings
+  // 4. Fix single quotes around strings
   repaired = repaired.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"');
 
-  // Remove trailing commas
+  // 5. Remove trailing commas
   repaired = repaired.replace(/,\s*([}\]])/g, '$1');
 
+  // 6. Try parsing after basic repairs
   try {
     return JSON.parse(repaired);
   } catch {
-    // Try collapsing unescaped newlines
+    // continue
+  }
+
+  // 7. Try sanitizing unescaped control characters
+  try {
     const noNewlines = repaired.replace(/[\r\n]+/g, ' ');
     return JSON.parse(noNewlines);
+  } catch {
+    // 8. Try escaping internal double quotes if needed
+    try {
+      const sanitizedQuotes = repaired.replace(/([^\\])"/g, '$1\\"').replace(/^\\"/, '"').replace(/\\"$/, '"');
+      return JSON.parse(sanitizedQuotes);
+    } catch {
+      // throw original error via JSON.parse
+      return JSON.parse(repaired);
+    }
   }
 }
 
