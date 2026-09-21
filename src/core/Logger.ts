@@ -59,7 +59,11 @@ export class Logger {
       fullEntry.decision === 'FALLBACK' ||
       fullEntry.decision === 'PERFECT_MATCH' ||
       fullEntry.decision === 'COMPLIANT_WITH_WARNINGS' ||
-      fullEntry.decision === 'STANDALONE';
+      fullEntry.decision === 'STANDALONE' ||
+      fullEntry.decision === 'CONTROLLED_ERROR' ||
+      fullEntry.decision === 'CIRCUIT_BREAKER' ||
+      fullEntry.decision === 'DENIED' ||
+      fullEntry.decision === 'OBSERVED';
     const level = entry.success || isControlledPersonaDecision ? 'INFO' : 'WARN';
     const tag = `[FOxty:${entry.actionType}]`;
     console.log(`${new Date().toLocaleTimeString()} ${level} ${tag} ${fullEntry.event} - Decision: ${fullEntry.decision}`);

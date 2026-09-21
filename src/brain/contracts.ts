@@ -49,13 +49,15 @@ export const MemoryCandidateSchema = z.object({
   type: z.enum(['episodic', 'behavioral', 'server', 'project', 'temporary']).default('episodic'),
   confidence: z.number().min(0).max(1).default(0.8),
   safeForTeasing: z.boolean().default(false),
+  safe_for_teasing: z.boolean().optional(),
   targetUser: z.enum(['Kris', 'Riely', 'Other']).optional(),
+  target_user: z.enum(['Kris', 'Riely', 'Other']).optional(),
 });
 
 export const BrainResponseSchema = z.object({
   action: DecisionActionEnum.optional(),
   decision: z.enum(['respond', 'ignore', 'react_only']).optional(),
-  tone: ToneTypeEnum.default('casual'),
+  tone: ToneTypeEnum.optional(),
   message: z.string().optional(),
   messages: z.array(z.string()).optional(),
   reaction: z.string().nullable().optional(),
@@ -67,6 +69,16 @@ export const BrainResponseSchema = z.object({
   memory_candidates: z.array(MemoryCandidateSchema).optional(),
   reason: z.string().optional(),
   reasoning: z.string().optional(),
+  thought: z.string().optional(),
+  pensamento: z.string().optional(),
+  raciocinio: z.string().optional(),
+  resposta: z.string().optional(),
+  respostas: z.array(z.string()).optional(),
+  mensagem: z.string().optional(),
+  mensagens: z.array(z.string()).optional(),
+  texto: z.string().optional(),
+  reacao: z.string().optional(),
+  reacoes: z.array(z.string()).optional(),
 });
 
 export type RawBrainOutput = z.infer<typeof BrainResponseSchema>;
@@ -75,33 +87,77 @@ export type RawBrainOutput = z.infer<typeof BrainResponseSchema>;
  * Normalizes validated brain raw output into a canonical BrainDecision structure.
  */
 export function normalizeBrainDecision(raw: RawBrainOutput): BrainDecision {
-  const reason = raw.reason || raw.reasoning;
-  const tone = (raw.tone || 'casual') as ToneType;
+  const reason =
+    raw.reason ||
+    raw.reasoning ||
+    raw.thought ||
+    raw.pensamento ||
+    raw.raciocinio ||
+    'Decisão cognitiva estruturada';
+
+  // Tone normalization
+  let tone: ToneType = 'casual';
+  const rawTone = (raw.tone || '').toLowerCase().trim();
+  const validTones: ToneType[] = [
+    'neutral',
+    'casual',
+    'curious',
+    'teasing',
+    'clever',
+    'dramatic',
+    'chaotic',
+    'sweet',
+    'deadpan',
+    'pseudo_serious',
+  ];
+  if (validTones.includes(rawTone as ToneType)) {
+    tone = rawTone as ToneType;
+  } else if (rawTone.includes('teas') || rawTone.includes('provoc') || rawTone.includes('deboch')) {
+    tone = 'teasing';
+  } else if (rawTone.includes('clever') || rawTone.includes('esperto') || rawTone.includes('astut')) {
+    tone = 'clever';
+  } else if (rawTone.includes('dramat')) {
+    tone = 'dramatic';
+  } else if (rawTone.includes('chao') || rawTone.includes('caot')) {
+    tone = 'chaotic';
+  } else if (rawTone.includes('sweet') || rawTone.includes('doce') || rawTone.includes('gentil')) {
+    tone = 'sweet';
+  } else if (rawTone.includes('deadpan') || rawTone.includes('seco')) {
+    tone = 'deadpan';
+  } else if (rawTone.includes('curio')) {
+    tone = 'curious';
+  }
 
   // 1. Resolve Messages
   const messages: string[] = [];
-  if (Array.isArray(raw.messages)) {
-    for (const m of raw.messages) {
+  const rawMessagesArr = raw.messages || raw.mensagens || raw.respostas;
+  if (Array.isArray(rawMessagesArr)) {
+    for (const m of rawMessagesArr) {
       if (typeof m === 'string' && m.trim().length > 0) {
         messages.push(m.trim());
       }
     }
-  } else if (typeof raw.message === 'string' && raw.message.trim().length > 0) {
-    messages.push(raw.message.trim());
+  } else {
+    const singleMsg = raw.message || raw.mensagem || raw.resposta || raw.texto;
+    if (typeof singleMsg === 'string' && singleMsg.trim().length > 0) {
+      messages.push(singleMsg.trim());
+    }
   }
 
   // 2. Resolve Reactions
   const reactions: string[] = [];
-  if (Array.isArray(raw.reactions)) {
-    for (const r of raw.reactions) {
+  const rawReactionsArr = raw.reactions || raw.reacoes;
+  if (Array.isArray(rawReactionsArr)) {
+    for (const r of rawReactionsArr) {
       if (typeof r === 'string' && r.trim().length > 0) {
         reactions.push(r.trim());
       }
     }
   }
-  if (typeof raw.reaction === 'string' && raw.reaction.trim().length > 0) {
-    if (!reactions.includes(raw.reaction.trim())) {
-      reactions.push(raw.reaction.trim());
+  const singleReaction = raw.reaction || raw.reacao;
+  if (typeof singleReaction === 'string' && singleReaction.trim().length > 0) {
+    if (!reactions.includes(singleReaction.trim())) {
+      reactions.push(singleReaction.trim());
     }
   }
 
@@ -137,22 +193,41 @@ export function normalizeBrainDecision(raw: RawBrainOutput): BrainDecision {
       content: mc.content,
       type: mc.type,
       confidence: mc.confidence,
-      safeForTeasing: mc.safeForTeasing,
-      targetUser: mc.targetUser,
+      safeForTeasing: mc.safeForTeasing ?? mc.safe_for_teasing ?? false,
+      targetUser: mc.targetUser ?? mc.target_user,
     });
   }
 
   // 5. Resolve Canonical Decision Enum
   let canonicalDecision: 'respond' | 'ignore' | 'react_only' = 'respond';
-  const action = raw.action;
+  const rawAction = (raw.action || '').toLowerCase().trim();
+  const rawDecision = (raw.decision || '').toLowerCase().trim();
 
-  if (action === 'ignore' || action === 'do_nothing' || raw.decision === 'ignore') {
+  if (
+    rawAction === 'ignore' ||
+    rawAction === 'do_nothing' ||
+    rawAction === 'silence' ||
+    rawAction === 'ignorar' ||
+    rawDecision === 'ignore' ||
+    rawDecision === 'silence'
+  ) {
     canonicalDecision = 'ignore';
-  } else if (action === 'react' || action === 'react_only' || raw.decision === 'react_only') {
+  } else if (
+    rawAction === 'react' ||
+    rawAction === 'react_only' ||
+    rawAction === 'reagir' ||
+    rawDecision === 'react_only'
+  ) {
     canonicalDecision = 'react_only';
-  } else if (action === 'respond' || action === 'respond_and_tool' || raw.decision === 'respond') {
+  } else if (
+    rawAction === 'respond' ||
+    rawAction === 'respond_and_tool' ||
+    rawAction === 'responder' ||
+    rawAction === 'send_message' ||
+    rawDecision === 'respond'
+  ) {
     canonicalDecision = 'respond';
-  } else if (action === 'tool_call') {
+  } else if (rawAction === 'tool_call') {
     canonicalDecision = messages.length > 0 ? 'respond' : 'ignore';
   } else if (messages.length === 0 && reactions.length > 0) {
     canonicalDecision = 'react_only';
@@ -160,11 +235,11 @@ export function normalizeBrainDecision(raw: RawBrainOutput): BrainDecision {
     canonicalDecision = 'ignore';
   }
 
-  const mode = raw.mode || (messages.length > 1 ? 'burst' : 'single');
+  const mode = (raw.mode === 'burst' || messages.length > 1) ? 'burst' : 'single';
 
   return {
     decision: canonicalDecision,
-    action: action || (canonicalDecision === 'respond' ? 'respond' : canonicalDecision === 'react_only' ? 'react' : 'ignore'),
+    action: (raw.action as any) || (canonicalDecision === 'respond' ? 'respond' : canonicalDecision === 'react_only' ? 'react' : 'ignore'),
     tone,
     messages,
     message: messages[0],
@@ -208,6 +283,41 @@ export function extractAndCleanJsonString(rawText: string): string {
   return cleaned.trim();
 }
 
+/**
+ * Robust JSON repair for common LLM syntax irregularities
+ */
+function attemptRepairJson(str: string): any {
+  // First try direct parse
+  try {
+    return JSON.parse(str);
+  } catch {
+    // continue
+  }
+
+  let repaired = str;
+  // Replace python-style booleans / none
+  repaired = repaired.replace(/:\s*True\b/g, ': true');
+  repaired = repaired.replace(/:\s*False\b/g, ': false');
+  repaired = repaired.replace(/:\s*None\b/g, ': null');
+
+  // Fix unquoted keys { key: "value" } -> { "key": "value" }
+  repaired = repaired.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
+
+  // Fix single quotes around strings
+  repaired = repaired.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"');
+
+  // Remove trailing commas
+  repaired = repaired.replace(/,\s*([}\]])/g, '$1');
+
+  try {
+    return JSON.parse(repaired);
+  } catch {
+    // Try collapsing unescaped newlines
+    const noNewlines = repaired.replace(/[\r\n]+/g, ' ');
+    return JSON.parse(noNewlines);
+  }
+}
+
 export function parseBrainOutput(rawText: string): { success: boolean; data?: BrainDecision; error?: string } {
   try {
     const cleaned = extractAndCleanJsonString(rawText);
@@ -221,18 +331,12 @@ export function parseBrainOutput(rawText: string): { success: boolean; data?: Br
 
     let json: any;
     try {
-      json = JSON.parse(cleaned);
+      json = attemptRepairJson(cleaned);
     } catch (parseErr: any) {
-      // Secondary repair attempt: fix unescaped newlines or single quotes
-      try {
-        const secondary = cleaned.replace(/[\n\r]/g, ' ');
-        json = JSON.parse(secondary);
-      } catch {
-        return {
-          success: false,
-          error: `Malformed JSON string: ${parseErr.message}`,
-        };
-      }
+      return {
+        success: false,
+        error: `Malformed JSON string: ${parseErr.message}`,
+      };
     }
 
     const parsed = BrainResponseSchema.safeParse(json);
