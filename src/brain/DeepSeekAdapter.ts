@@ -1,7 +1,7 @@
 import { BrainDecision, ContextPackage, ThinkingMode, ReasoningEffort } from '../types.js';
 import { parseBrainOutput } from './contracts.js';
-import { logger } from '../core/Logger.js';
-import { isSakuraMailChannel, isChannelBlocked } from '../config/index.js';
+import { logger, sanitizeSensitiveData } from '../core/Logger.js';
+import { isSakuraMailChannel, isChannelBlocked, loadConfig } from '../config/index.js';
 
 export interface DeepSeekConfig {
   apiKey?: string;
@@ -16,15 +16,70 @@ export interface DeepSeekConfig {
   fetchFn?: typeof fetch;
 }
 
+export type CircuitBreakerState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+
+export interface CircuitBreakerStatus {
+  state: CircuitBreakerState;
+  failureCount: number;
+  reason?: string;
+  cooldownRemainingMs: number;
+  lastFailureTime?: number;
+}
+
+export interface DeepSeekDiagnostic {
+  configured: boolean;
+  baseUrl: string;
+  model: string;
+  status: 'active' | 'standby_insufficient_balance' | 'error' | 'disabled';
+  circuitBreaker: 'open' | 'closed' | 'half_open';
+  circuitBreakerDetails?: CircuitBreakerStatus;
+  lastCallTimestamp: string | null;
+  lastTokensUsed: number;
+  totalTokensUsed: number;
+  totalAiCalls: number;
+  fallbackEnabled: boolean;
+  lastError: string | null;
+  latencyMs: number;
+  lastAiResult: 'REAL_AI' | 'FALLBACK' | 'SILENCE' | 'ERROR' | 'CIRCUIT_BREAKER' | 'NONE';
+}
+
+export interface DeepSeekTestResult {
+  success: boolean;
+  hasApiKey: boolean;
+  model: string;
+  endpoint: string;
+  status: number | string;
+  latencyMs: number;
+  tokensUsed: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  replySample?: string;
+  circuitBreakerState: CircuitBreakerState;
+  error?: string;
+}
+
 export class DeepSeekAdapter {
   private config: Required<Omit<DeepSeekConfig, 'apiKey' | 'reasoningEffort' | 'fetchFn'>> & {
     apiKey?: string;
     reasoningEffort?: ReasoningEffort;
   };
   private fetchImpl: typeof fetch;
-  private insufficientBalanceDetected: boolean = false;
-  private lastInsufficientBalanceTimestamp: number = 0;
-  private readonly insufficientBalanceCooldownMs: number = 60000;
+
+  // Circuit Breaker State
+  private cbState: CircuitBreakerState = 'CLOSED';
+  private cbFailureCount: number = 0;
+  private cbLastFailureTime: number = 0;
+  private cbCooldownMs: number = 0;
+  private cbReason?: string;
+
+  // Diagnostics & Observability
+  private lastAiCallTimestamp?: number;
+  private lastAiResult: 'REAL_AI' | 'FALLBACK' | 'SILENCE' | 'ERROR' | 'CIRCUIT_BREAKER' | 'NONE' = 'NONE';
+  private lastTokens: number = 0;
+  private totalTokensUsed: number = 0;
+  private totalAiCalls: number = 0;
+  private lastError?: string;
+  private lastLatencyMs: number = 0;
 
   constructor(config: DeepSeekConfig) {
     this.config = {
@@ -49,18 +104,209 @@ export class DeepSeekAdapter {
     return { ...this.config };
   }
 
-  public isInsufficientBalance(): boolean {
-    if (!this.insufficientBalanceDetected) return false;
-    if (Date.now() - this.lastInsufficientBalanceTimestamp > this.insufficientBalanceCooldownMs) {
-      this.insufficientBalanceDetected = false;
-      return false;
+  public getCircuitBreakerState(): CircuitBreakerStatus {
+    const now = Date.now();
+    let effectiveState = this.cbState;
+    let cooldownRemaining = 0;
+
+    if (this.cbState === 'OPEN') {
+      const elapsed = now - this.cbLastFailureTime;
+      if (elapsed >= this.cbCooldownMs) {
+        effectiveState = 'HALF_OPEN';
+        this.cbState = 'HALF_OPEN';
+      } else {
+        cooldownRemaining = this.cbCooldownMs - elapsed;
+      }
     }
-    return true;
+
+    return {
+      state: effectiveState,
+      failureCount: this.cbFailureCount,
+      reason: this.cbReason,
+      cooldownRemainingMs: Math.max(0, cooldownRemaining),
+      lastFailureTime: this.cbLastFailureTime || undefined,
+    };
+  }
+
+  public resetCircuitBreaker(): void {
+    this.cbState = 'CLOSED';
+    this.cbFailureCount = 0;
+    this.cbLastFailureTime = 0;
+    this.cbCooldownMs = 0;
+    this.cbReason = undefined;
+  }
+
+  private tripCircuitBreaker(reason: string, cooldownMs: number): void {
+    this.cbState = 'OPEN';
+    this.cbFailureCount++;
+    this.cbLastFailureTime = Date.now();
+    this.cbCooldownMs = cooldownMs;
+    this.cbReason = reason;
+  }
+
+  private recordCircuitBreakerSuccess(): void {
+    this.cbState = 'CLOSED';
+    this.cbFailureCount = 0;
+    this.cbReason = undefined;
+    this.cbCooldownMs = 0;
+  }
+
+  public isInsufficientBalance(): boolean {
+    const cb = this.getCircuitBreakerState();
+    return cb.state === 'OPEN' && cb.reason === 'DEEPSEEK_INSUFFICIENT_BALANCE';
   }
 
   public resetBalanceStatus(): void {
-    this.insufficientBalanceDetected = false;
-    this.lastInsufficientBalanceTimestamp = 0;
+    this.resetCircuitBreaker();
+  }
+
+  public getDiagnosticStatus(): DeepSeekDiagnostic {
+    const cb = this.getCircuitBreakerState();
+    let status: 'active' | 'standby_insufficient_balance' | 'error' | 'disabled' = 'active';
+    if (!this.config.apiKey) {
+      status = 'disabled';
+    } else if (cb.state === 'OPEN' && cb.reason === 'DEEPSEEK_INSUFFICIENT_BALANCE') {
+      status = 'standby_insufficient_balance';
+    } else if (cb.state === 'OPEN' || (this.lastError && this.lastAiResult === 'ERROR')) {
+      status = 'error';
+    }
+
+    const cbStateNormalized = cb.state.toLowerCase() as 'open' | 'closed' | 'half_open';
+
+    return {
+      configured: Boolean(this.config.apiKey),
+      baseUrl: this.config.baseUrl,
+      model: this.config.model,
+      status,
+      circuitBreaker: cbStateNormalized,
+      circuitBreakerDetails: cb,
+      lastCallTimestamp: this.lastAiCallTimestamp ? new Date(this.lastAiCallTimestamp).toISOString() : null,
+      lastTokensUsed: this.lastTokens,
+      totalTokensUsed: this.totalTokensUsed,
+      totalAiCalls: this.totalAiCalls,
+      fallbackEnabled: Boolean(this.config.allowHeuristicFallback),
+      lastError: this.lastError ? sanitizeSensitiveData(this.lastError) : null,
+      latencyMs: this.lastLatencyMs || 0,
+      lastAiResult: this.lastAiResult,
+    };
+  }
+
+  public async testDeepSeekConnection(): Promise<DeepSeekTestResult> {
+    const startTime = Date.now();
+    const endpoint = `${this.config.baseUrl.replace(/\/$/, '')}/chat/completions`;
+
+    if (!this.config.apiKey) {
+      return {
+        success: false,
+        hasApiKey: false,
+        model: this.config.model,
+        endpoint,
+        status: 'MISSING_API_KEY',
+        latencyMs: 0,
+        tokensUsed: 0,
+        circuitBreakerState: this.getCircuitBreakerState().state,
+        error: 'DEEPSEEK_API_KEY is not configured in environment',
+      };
+    }
+
+    const cbState = this.getCircuitBreakerState();
+    if (cbState.state === 'OPEN') {
+      return {
+        success: false,
+        hasApiKey: true,
+        model: this.config.model,
+        endpoint,
+        status: 'CIRCUIT_BREAKER_OPEN',
+        latencyMs: 0,
+        tokensUsed: 0,
+        circuitBreakerState: 'OPEN',
+        error: `Circuit breaker is OPEN: ${cbState.reason} (cooldown remaining: ${Math.round(cbState.cooldownRemainingMs / 1000)}s)`,
+      };
+    }
+
+    try {
+      const response = await this.fetchImpl(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.config.apiKey}`,
+        },
+        signal: AbortSignal.timeout(this.config.timeoutMs),
+        body: JSON.stringify({
+          model: this.config.model,
+          messages: [{ role: 'user', content: 'Ping: return JSON {"status":"ok"}' }],
+          response_format: { type: 'json_object' },
+          max_tokens: 30,
+        }),
+      });
+
+      const latencyMs = Date.now() - startTime;
+
+      if (!response.ok) {
+        if (response.status === 402) {
+          this.tripCircuitBreaker('DEEPSEEK_INSUFFICIENT_BALANCE', 60000);
+        } else if (response.status === 401) {
+          this.tripCircuitBreaker('DEEPSEEK_UNAUTHORIZED', 60000);
+        } else if (response.status === 429) {
+          this.tripCircuitBreaker('DEEPSEEK_RATE_LIMIT', 30000);
+        } else if (response.status >= 500) {
+          this.tripCircuitBreaker(`DEEPSEEK_SERVER_ERROR_${response.status}`, 20000);
+        }
+
+        return {
+          success: false,
+          hasApiKey: true,
+          model: this.config.model,
+          endpoint,
+          status: response.status,
+          latencyMs,
+          tokensUsed: 0,
+          circuitBreakerState: this.getCircuitBreakerState().state,
+          error: `HTTP_${response.status}`,
+        };
+      }
+
+      const data: any = await response.json();
+      const usage = data.usage || {};
+      const tokensUsed = usage.total_tokens || 0;
+      const sample = data.choices?.[0]?.message?.content?.substring(0, 100);
+
+      this.recordCircuitBreakerSuccess();
+
+      return {
+        success: true,
+        hasApiKey: true,
+        model: this.config.model,
+        endpoint,
+        status: 200,
+        latencyMs,
+        tokensUsed,
+        promptTokens: usage.prompt_tokens,
+        completionTokens: usage.completion_tokens,
+        replySample: sample,
+        circuitBreakerState: 'CLOSED',
+      };
+    } catch (err: any) {
+      const latencyMs = Date.now() - startTime;
+      const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError' || err.message?.toLowerCase().includes('timeout');
+      if (isTimeout) {
+        this.tripCircuitBreaker('DEEPSEEK_TIMEOUT', 15000);
+      } else {
+        this.cbFailureCount++;
+      }
+
+      return {
+        success: false,
+        hasApiKey: true,
+        model: this.config.model,
+        endpoint,
+        status: 'ERROR',
+        latencyMs,
+        tokensUsed: 0,
+        circuitBreakerState: this.getCircuitBreakerState().state,
+        error: err.message || 'Connection test failed',
+      };
+    }
   }
 
   public async evaluate(
@@ -82,6 +328,7 @@ export class DeepSeekAdapter {
       isChannelBlocked(context.channel.id) ||
       context.channel.foxtyPolicy === 'Uso Bloqueado'
     ) {
+      this.lastAiResult = 'SILENCE';
       return {
         decision: {
           decision: 'ignore',
@@ -98,6 +345,8 @@ export class DeepSeekAdapter {
     // 2. Handling Missing API Key
     if (!this.config.apiKey) {
       if (this.config.allowHeuristicFallback) {
+        this.lastAiResult = 'FALLBACK';
+        this.lastTokens = 0;
         const decision = this.heuristicEvaluation(context, promptInstruction);
         logger.log({
           event: 'DeepSeek Offline Dev Mode (Heuristic Active)',
@@ -112,6 +361,9 @@ export class DeepSeekAdapter {
         return { decision, aiUsed: false, tokensUsed: 0 };
       }
 
+      this.lastAiResult = 'SILENCE';
+      this.lastTokens = 0;
+      this.lastError = 'DEEPSEEK_API_KEY_MISSING';
       logger.log({
         event: 'DeepSeek API Key Missing (Contextual Inaction)',
         channelId: context.channel.id,
@@ -138,13 +390,17 @@ export class DeepSeekAdapter {
       };
     }
 
-    // 2b. Circuit Breaker for Insufficient Balance (Standby Mode)
-    if (this.isInsufficientBalance()) {
-      const errorCode = 'DEEPSEEK_INSUFFICIENT_BALANCE';
+    // 2b. Circuit Breaker Active Check (Standby Mode)
+    const cbState = this.getCircuitBreakerState();
+    if (cbState.state === 'OPEN') {
+      const errorCode = cbState.reason || 'DEEPSEEK_CIRCUIT_BREAKER_OPEN';
       if (this.config.allowHeuristicFallback) {
+        this.lastAiResult = 'FALLBACK';
+        this.lastTokens = 0;
+        this.lastError = errorCode;
         const decision = this.heuristicEvaluation(context, promptInstruction);
         logger.log({
-          event: `DeepSeek Brain Standby (${errorCode} - Heuristic Fallback Active)`,
+          event: `DeepSeek Brain Circuit Breaker OPEN (${errorCode} - Heuristic Fallback Active)`,
           channelId: context.channel.id,
           actionType: 'BRAIN_EVALUATION',
           decision: decision.decision,
@@ -157,16 +413,19 @@ export class DeepSeekAdapter {
         return { decision, aiUsed: false, tokensUsed: 0, error: errorCode };
       }
 
+      this.lastAiResult = 'CIRCUIT_BREAKER';
+      this.lastTokens = 0;
+      this.lastError = errorCode;
       logger.log({
-        event: `DeepSeek Brain Standby (Inaction Enforced: ${errorCode})`,
+        event: `DeepSeek Brain Circuit Breaker OPEN (Inaction Enforced: ${errorCode})`,
         channelId: context.channel.id,
         actionType: 'BRAIN_EVALUATION',
-        decision: 'SILENCE',
+        decision: 'CIRCUIT_BREAKER',
         success: false,
         aiUsed: false,
         durationMs: Date.now() - startTime,
         error: errorCode,
-        details: 'DeepSeek account balance is exhausted (HTTP 402). Inaction enforced without wasteful retries.',
+        details: `Reason: ${cbState.reason}, Cooldown remaining: ${Math.round(cbState.cooldownRemainingMs / 1000)}s`,
       });
 
       return {
@@ -175,7 +434,7 @@ export class DeepSeekAdapter {
           action: 'ignore',
           tone: 'neutral',
           messages: [],
-          reasoning: 'DeepSeek account balance exhausted (HTTP 402). Contextual action safely skipped.',
+          reasoning: `DeepSeek circuit breaker OPEN (${errorCode}). Inaction safely enforced.`,
         },
         aiUsed: false,
         tokensUsed: 0,
@@ -298,6 +557,15 @@ export class DeepSeekAdapter {
       const proposedTools = validDecision.actionRequests?.map((a) => a.tool) || validDecision.tool_calls?.map((t) => t.name) || [];
 
       // Safe Observability: Log success with structured summary
+      this.recordCircuitBreakerSuccess();
+      this.lastAiCallTimestamp = Date.now();
+      this.lastAiResult = 'REAL_AI';
+      this.lastTokens = tokensUsed;
+      this.totalTokensUsed += tokensUsed;
+      this.totalAiCalls++;
+      this.lastLatencyMs = Date.now() - startTime;
+      this.lastError = undefined;
+
       logger.log({
         event: 'DeepSeek Evaluation Succeeded',
         channelId: context.channel.id,
@@ -329,16 +597,27 @@ export class DeepSeekAdapter {
       let errorCode = err.message || 'DEEPSEEK_UNEXPECTED_ERROR';
       if (isTimeout) {
         errorCode = 'DEEPSEEK_TIMEOUT';
+        this.tripCircuitBreaker('DEEPSEEK_TIMEOUT', 15000);
       } else if (isInsufficientBalance) {
         errorCode = 'DEEPSEEK_INSUFFICIENT_BALANCE';
-        this.insufficientBalanceDetected = true;
-        this.lastInsufficientBalanceTimestamp = Date.now();
+        this.tripCircuitBreaker('DEEPSEEK_INSUFFICIENT_BALANCE', 60000);
       } else if (isRateLimit) {
         errorCode = 'DEEPSEEK_RATE_LIMIT';
+        this.tripCircuitBreaker('DEEPSEEK_RATE_LIMIT', 30000);
       } else if (isUnauthorized) {
         errorCode = 'DEEPSEEK_UNAUTHORIZED';
+        this.tripCircuitBreaker('DEEPSEEK_UNAUTHORIZED', 60000);
+      } else {
+        this.cbFailureCount++;
+        if (this.cbFailureCount >= 2) {
+          this.tripCircuitBreaker(errorCode, 20000);
+        }
       }
       const durationMs = Date.now() - startTime;
+      this.lastLatencyMs = durationMs;
+      this.lastTokens = 0;
+      this.lastError = errorCode;
+      this.lastAiResult = this.config.allowHeuristicFallback ? 'FALLBACK' : 'ERROR';
 
       if (this.config.allowHeuristicFallback) {
         logger.log({
@@ -661,5 +940,14 @@ Você DEVE responder ESTRITAMENTE em formato JSON com o seguinte schema:
       reactions: ['🦊'],
     };
   }
+}
+
+export async function testDeepSeekConnection(adapter?: DeepSeekAdapter): Promise<DeepSeekTestResult> {
+  if (adapter) {
+    return adapter.testDeepSeekConnection();
+  }
+  const config = loadConfig();
+  const defaultAdapter = new DeepSeekAdapter(config.deepSeek);
+  return defaultAdapter.testDeepSeekConnection();
 }
 

@@ -1,8 +1,10 @@
 import { MemoryItem } from '../types.js';
-import { IMemoryStore, MemorySearchOptions } from './MemoryStore.js';
+import { IMemoryStore, MemorySearchOptions, MemoryHealth } from './MemoryStore.js';
 
 export class InMemoryStore implements IMemoryStore {
   private store: Map<string, MemoryItem> = new Map();
+  private lastOperation: string = 'init';
+  private lastOperationTime: string = new Date().toISOString();
 
   constructor(seedWithDefaults = true) {
     if (seedWithDefaults) {
@@ -91,6 +93,28 @@ export class InMemoryStore implements IMemoryStore {
     return Array.from(this.store.values()).sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
+  }
+
+  public async clear(): Promise<void> {
+    this.store.clear();
+    this.lastOperation = 'clear';
+    this.lastOperationTime = new Date().toISOString();
+  }
+
+  public async getHealth(): Promise<MemoryHealth> {
+    return {
+      provider: 'in-memory',
+      connected: true,
+      available: true,
+      readWriteOk: true,
+      recordCount: this.store.size,
+      totalRecords: this.store.size,
+      lastOperation: this.lastOperation,
+      lastOperationTime: this.lastOperationTime,
+      lastOperationTimestamp: this.lastOperationTime,
+      storagePath: ':memory:',
+      error: null,
+    };
   }
 
   private seedInitialMemories(): void {

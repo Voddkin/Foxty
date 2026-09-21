@@ -89,9 +89,16 @@ export class ToolRegistry {
       }
     }
 
-    // 3. Schema & Arguments validation via Zod
+    const rawArgs: Record<string, any> = action.arguments && typeof action.arguments === 'object' ? action.arguments : {};
+
+    // 3. Schema & Arguments validation via Zod with normalized inputs
     if (action.tool === 'send_message') {
-      const parsed = SendMessageArgsSchema.safeParse(action.arguments);
+      const normalized = {
+        channel_id: rawArgs.channel_id !== undefined ? rawArgs.channel_id : (rawArgs.channelId !== undefined ? rawArgs.channelId : channel.id),
+        content: rawArgs.content !== undefined ? rawArgs.content : (rawArgs.message !== undefined ? rawArgs.message : (rawArgs.text !== undefined ? rawArgs.text : '')),
+      };
+
+      const parsed = SendMessageArgsSchema.safeParse(normalized);
       if (!parsed.success) {
         return { valid: false, error: `Invalid arguments: ${parsed.error.message}` };
       }
@@ -99,7 +106,21 @@ export class ToolRegistry {
     }
 
     if (action.tool === 'send_multiple_messages') {
-      const parsed = SendMultipleMessagesArgsSchema.safeParse(action.arguments);
+      let messagesArr: any[] = [];
+      if (Array.isArray(rawArgs.messages)) {
+        messagesArr = rawArgs.messages;
+      } else if (typeof rawArgs.message === 'string') {
+        messagesArr = [rawArgs.message];
+      } else if (typeof rawArgs.content === 'string') {
+        messagesArr = [rawArgs.content];
+      }
+
+      const normalized = {
+        channel_id: rawArgs.channel_id !== undefined ? rawArgs.channel_id : (rawArgs.channelId !== undefined ? rawArgs.channelId : channel.id),
+        messages: messagesArr,
+      };
+
+      const parsed = SendMultipleMessagesArgsSchema.safeParse(normalized);
       if (!parsed.success) {
         return { valid: false, error: `Invalid arguments: ${parsed.error.message}` };
       }
@@ -107,7 +128,13 @@ export class ToolRegistry {
     }
 
     if (action.tool === 'react') {
-      const parsed = ReactArgsSchema.safeParse(action.arguments);
+      const normalized = {
+        channel_id: rawArgs.channel_id !== undefined ? rawArgs.channel_id : (rawArgs.channelId !== undefined ? rawArgs.channelId : channel.id),
+        message_id: rawArgs.message_id !== undefined ? rawArgs.message_id : (rawArgs.messageId !== undefined ? rawArgs.messageId : ''),
+        emoji: rawArgs.emoji !== undefined ? rawArgs.emoji : (rawArgs.reaction !== undefined ? rawArgs.reaction : ''),
+      };
+
+      const parsed = ReactArgsSchema.safeParse(normalized);
       if (!parsed.success) {
         return { valid: false, error: `Invalid arguments: ${parsed.error.message}` };
       }
@@ -115,7 +142,13 @@ export class ToolRegistry {
     }
 
     if (action.tool === 'search_memory') {
-      const parsed = SearchMemoryArgsSchema.safeParse(action.arguments);
+      const normalized = {
+        query: rawArgs.query !== undefined ? rawArgs.query : (rawArgs.q !== undefined ? rawArgs.q : (rawArgs.search !== undefined ? rawArgs.search : '')),
+        safe_for_teasing_only: rawArgs.safe_for_teasing_only !== undefined ? rawArgs.safe_for_teasing_only : (rawArgs.safeForTeasingOnly !== undefined ? rawArgs.safeForTeasingOnly : true),
+        category: rawArgs.category || rawArgs.type,
+      };
+
+      const parsed = SearchMemoryArgsSchema.safeParse(normalized);
       if (!parsed.success) {
         return { valid: false, error: `Invalid arguments: ${parsed.error.message}` };
       }
@@ -123,7 +156,15 @@ export class ToolRegistry {
     }
 
     if (action.tool === 'save_memory') {
-      const parsed = SaveMemoryArgsSchema.safeParse(action.arguments);
+      const normalized = {
+        content: rawArgs.content !== undefined ? rawArgs.content : (rawArgs.memory !== undefined ? rawArgs.memory : (rawArgs.text !== undefined ? rawArgs.text : '')),
+        type: rawArgs.type || 'episodic',
+        importance: typeof rawArgs.importance === 'number' ? rawArgs.importance : 0.7,
+        safe_for_teasing: rawArgs.safe_for_teasing !== undefined ? rawArgs.safe_for_teasing : (rawArgs.safeForTeasing !== undefined ? rawArgs.safeForTeasing : false),
+        target_user: rawArgs.target_user || rawArgs.targetUser,
+      };
+
+      const parsed = SaveMemoryArgsSchema.safeParse(normalized);
       if (!parsed.success) {
         return { valid: false, error: `Invalid arguments: ${parsed.error.message}` };
       }
@@ -141,7 +182,11 @@ export class ToolRegistry {
     }
 
     if (action.tool === 'get_channel_info') {
-      const parsed = GetChannelInfoArgsSchema.safeParse(action.arguments);
+      const normalized = {
+        channel_id: rawArgs.channel_id !== undefined ? rawArgs.channel_id : (rawArgs.channelId !== undefined ? rawArgs.channelId : channel.id),
+      };
+
+      const parsed = GetChannelInfoArgsSchema.safeParse(normalized);
       if (!parsed.success) {
         return { valid: false, error: `Invalid arguments: ${parsed.error.message}` };
       }
@@ -153,7 +198,12 @@ export class ToolRegistry {
     }
 
     if (action.tool === 'trigger_event') {
-      const parsed = TriggerEventArgsSchema.safeParse(action.arguments);
+      const normalized = {
+        event_id: rawArgs.event_id !== undefined ? rawArgs.event_id : (rawArgs.eventId !== undefined ? rawArgs.eventId : ''),
+        channel_id: rawArgs.channel_id !== undefined ? rawArgs.channel_id : (rawArgs.channelId !== undefined ? rawArgs.channelId : channel.id),
+      };
+
+      const parsed = TriggerEventArgsSchema.safeParse(normalized);
       if (!parsed.success) {
         return { valid: false, error: `Invalid arguments: ${parsed.error.message}` };
       }

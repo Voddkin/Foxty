@@ -459,6 +459,8 @@ export interface DiscordConnectionAudit {
     pingMs: number;
     intents: {
       guilds: boolean;
+      guildMembers?: boolean;
+      guildPresences?: boolean;
       guildMessages: boolean;
       messageContent: boolean;
       guildMessageReactions: boolean;

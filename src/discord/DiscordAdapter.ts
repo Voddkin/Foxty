@@ -44,11 +44,13 @@ export class DiscordAdapter implements DiscordActionHandler {
       this.client = new Client({
         intents: [
           GatewayIntentBits.Guilds,
+          GatewayIntentBits.GuildMembers,
+          GatewayIntentBits.GuildPresences,
           GatewayIntentBits.GuildMessages,
           GatewayIntentBits.MessageContent,
           GatewayIntentBits.GuildMessageReactions,
         ],
-        partials: [Partials.Message, Partials.Channel, Partials.Reaction],
+        partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.GuildMember, Partials.User],
       });
 
       // Handle client ready (ClientReady event)
@@ -109,6 +111,18 @@ export class DiscordAdapter implements DiscordActionHandler {
           event: 'Discord Gateway Reconnected / Resumed',
           actionType: 'DISCORD_LIFECYCLE',
           decision: 'RESUMED',
+          success: true,
+          aiUsed: false,
+          durationMs: 0,
+        });
+      });
+
+      // Handle member updates and presence changes (Cherry Place community tracking)
+      this.client.on(Events.GuildMemberAdd, (member) => {
+        logger.log({
+          event: `Member Joined Cherry Place: ${member.displayName || member.user.username}`,
+          actionType: 'DISCORD_LIFECYCLE',
+          decision: 'OBSERVED',
           success: true,
           aiUsed: false,
           durationMs: 0,
@@ -267,11 +281,15 @@ export class DiscordAdapter implements DiscordActionHandler {
           pingMs: -1,
           intents: {
             guilds: true,
+            guildMembers: true,
+            guildPresences: true,
             guildMessages: true,
             messageContent: true,
             guildMessageReactions: true,
             rawIntents:
               GatewayIntentBits.Guilds |
+              GatewayIntentBits.GuildMembers |
+              GatewayIntentBits.GuildPresences |
               GatewayIntentBits.GuildMessages |
               GatewayIntentBits.MessageContent |
               GatewayIntentBits.GuildMessageReactions,
@@ -333,11 +351,15 @@ export class DiscordAdapter implements DiscordActionHandler {
 
     const intents = {
       guilds: true,
+      guildMembers: true,
+      guildPresences: true,
       guildMessages: true,
       messageContent: true,
       guildMessageReactions: true,
       rawIntents:
         GatewayIntentBits.Guilds |
+        GatewayIntentBits.GuildMembers |
+        GatewayIntentBits.GuildPresences |
         GatewayIntentBits.GuildMessages |
         GatewayIntentBits.MessageContent |
         GatewayIntentBits.GuildMessageReactions,
@@ -457,7 +479,7 @@ export class DiscordAdapter implements DiscordActionHandler {
       `• **Bot User**: **${restBotUser?.username || this.client?.user?.username || 'Desconhecido'}** (\`${restBotUser?.id || clientId}\`)\n` +
       `• **Gateway WebSocket**: ${isGatewayReady ? `✅ \`ONLINE\` (Latência: ${pingMs}ms)` : `⚠️ \`${gatewayStatus}\``}\n` +
       `• **REST API**: ${restStatus === 'CONNECTED' ? `✅ \`OK\` (${restLatencyMs}ms)` : `❌ \`ERRO: ${restError}\``}\n` +
-      `• **Intents Configurados**: \`Guilds\`, \`GuildMessages\`, \`MessageContent\` (Privilegiado), \`GuildMessageReactions\`\n` +
+      `• **Intents Configurados**: \`Guilds\`, \`GuildMembers\` (Privilegiado), \`GuildPresences\` (Privilegiado), \`GuildMessages\`, \`MessageContent\` (Privilegiado), \`GuildMessageReactions\`\n` +
       `• **Cherry Place Server**: ${guildIdentified ? `✅ Conectado — "${actualGuildName}" (\`${guildId}\`)` : `⚠️ Não sincronizado (\`${guildId}\`)`}\n` +
       `  └ *Canais*: ${actualChannelCount ?? '?'} texto/voz | *Categorias*: ${actualCategoriesCount ?? '?'} | *Membros*: ${actualMemberCount ?? '?'}\n` +
       `• **Slash Command \`/foxty\`**: ${commandRegistered ? `✅ Registrado no escopo \`${commandScope}\` (ID: \`${commandId}\`, opções: ${optionsCount})` : `⚠️ Não registrado (${commandError || 'pendente'})`}\n` +

@@ -18,12 +18,11 @@ import {
 import { ContextBuilder } from './ContextBuilder.js';
 import { StateManager } from './StateManager.js';
 import { Logger, logger } from './Logger.js';
-import { IMemoryStore } from '../memory/MemoryStore.js';
-import { InMemoryStore } from '../memory/InMemoryStore.js';
+import { IMemoryStore, createDefaultMemoryStore, MemoryHealth } from '../memory/index.js';
 import { BehavioralAnalyzer } from '../behavior/BehavioralAnalyzer.js';
 import { PersonalityEngine } from '../personality/PersonalityEngine.js';
 import { EventEngine } from '../events/EventEngine.js';
-import { DeepSeekAdapter } from '../brain/DeepSeekAdapter.js';
+import { DeepSeekAdapter, DeepSeekDiagnostic } from '../brain/DeepSeekAdapter.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
 import { DiscordActionHandler, ToolExecutionResult, ToolExecutor } from '../tools/ToolExecutor.js';
 import { SakuraMailBridge, SakuraMailRawInput } from '../integrations/SakuraMailBridge.js';
@@ -33,6 +32,20 @@ import {
   ChannelPolicyLevel,
   PreConsultationDecision,
 } from '../policy/ChannelBehaviorPolicy.js';
+import { coreMetrics, CoreMetrics } from './FoxtyMetrics.js';
+
+export interface GeneralHealthStatus {
+  status: 'ok' | 'degraded' | 'unhealthy';
+  timestamp: string;
+  uptime: number;
+  version: string;
+  environment: string;
+  discord: 'connected' | 'disconnected' | 'simulated';
+  deepseek: 'connected' | 'standby' | 'disabled' | 'error';
+  memory: 'connected' | 'degraded' | 'error';
+  sakuramail: 'connected' | 'disabled';
+  metrics: CoreMetrics;
+}
 
 export interface InteractionResult {
   decision: BrainDecision;
@@ -59,9 +72,15 @@ export class FoxtyCore {
   private serverMapValidator: ServerMapValidator;
   private discordHandler?: DiscordActionHandler;
   private recentMessagesBuffer: Map<string, ChatMessage[]> = new Map();
+  private startTime: number = Date.now();
 
-  constructor(private config: FoxtyConfig) {
-    this.memoryStore = new InMemoryStore(true);
+  constructor(private config: FoxtyConfig, customMemoryStore?: IMemoryStore) {
+    this.memoryStore =
+      customMemoryStore ||
+      config.memoryStore ||
+      createDefaultMemoryStore({
+        provider: config.memoryProvider,
+      });
     this.stateManager = new StateManager(config.defaultState);
     this.behavioralAnalyzer = new BehavioralAnalyzer();
     this.personalityEngine = new PersonalityEngine();
@@ -190,6 +209,74 @@ export class FoxtyCore {
     return this.toolExecutor;
   }
 
+  public getMetrics(): Readonly<CoreMetrics> {
+    return coreMetrics.getSnapshot();
+  }
+
+  public async getMemoryHealth(): Promise<MemoryHealth> {
+    return this.memoryStore.getHealth();
+  }
+
+  public async getDeepSeekHealth(): Promise<DeepSeekDiagnostic> {
+    return this.deepSeekAdapter.getDiagnosticStatus();
+  }
+
+  public async getGeneralHealth(): Promise<GeneralHealthStatus> {
+    const memoryHealth = await this.getMemoryHealth();
+    const deepSeekDiag = await this.getDeepSeekHealth();
+
+    let discordStatus: 'connected' | 'disconnected' | 'simulated' = 'disconnected';
+    if (this.discordHandler && typeof (this.discordHandler as any).auditConnection === 'function') {
+      try {
+        const audit = await (this.discordHandler as any).auditConnection();
+        discordStatus = audit.connected ? 'connected' : (this.config.testMode ? 'simulated' : 'disconnected');
+      } catch {
+        discordStatus = this.config.testMode ? 'simulated' : 'disconnected';
+      }
+    } else if (this.config.testMode) {
+      discordStatus = 'simulated';
+    }
+
+    let memoryStatus: 'connected' | 'degraded' | 'error' = 'connected';
+    if (!memoryHealth.connected || !memoryHealth.readWriteOk) {
+      memoryStatus = memoryHealth.connected ? 'degraded' : 'error';
+    }
+
+    let deepseekStatus: 'connected' | 'standby' | 'disabled' | 'error' = 'connected';
+    if (!deepSeekDiag.configured) {
+      deepseekStatus = 'disabled';
+    } else if (deepSeekDiag.status === 'standby_insufficient_balance') {
+      deepseekStatus = 'standby';
+    } else if (deepSeekDiag.status === 'error') {
+      deepseekStatus = 'error';
+    }
+
+    let overallStatus: 'ok' | 'degraded' | 'unhealthy' = 'ok';
+    if (memoryStatus === 'error' || (deepseekStatus === 'error' && !this.config.deepSeek?.allowHeuristicFallback)) {
+      overallStatus = 'unhealthy';
+    } else if (
+      deepseekStatus === 'standby' ||
+      deepseekStatus === 'disabled' ||
+      memoryStatus === 'degraded' ||
+      discordStatus === 'disconnected'
+    ) {
+      overallStatus = 'degraded';
+    }
+
+    return {
+      status: overallStatus,
+      timestamp: new Date().toISOString(),
+      uptime: Math.floor((Date.now() - this.startTime) / 1000),
+      version: '0.1.0',
+      environment: process.env.NODE_ENV || 'development',
+      discord: discordStatus,
+      deepseek: deepseekStatus,
+      memory: memoryStatus,
+      sakuramail: 'connected',
+      metrics: coreMetrics.getSnapshot(),
+    };
+  }
+
   // ==========================================
   // Core Pipeline Execution
   // ==========================================
@@ -245,6 +332,7 @@ export class FoxtyCore {
     };
 
     // Maintain recent messages buffer for channel
+    coreMetrics.recordMessageObserved();
     const buffer = this.recentMessagesBuffer.get(channelId) || [];
     buffer.push(currentMessage);
     if (buffer.length > 20) buffer.shift();
@@ -264,6 +352,8 @@ export class FoxtyCore {
     });
 
     if (!policyEvaluation.shouldProceedToBrain) {
+      coreMetrics.recordBrainSkipped();
+      coreMetrics.recordSilence();
       logger.log({
         event: 'Foxty Channel Policy Gate: Skipped Brain Consultation',
         channelId,
@@ -296,6 +386,8 @@ export class FoxtyCore {
     const shouldSilence = this.personalityEngine.shouldStaySilent(currentState, isDirectMention, channel);
 
     if (shouldSilence) {
+      coreMetrics.recordBrainSkipped();
+      coreMetrics.recordSilence();
       logger.log({
         event: 'Foxty Chose Silence (Personality Economy)',
         channelId,
@@ -331,11 +423,26 @@ export class FoxtyCore {
       repliedMessage,
     });
 
+    if (context.relevantMemories && context.relevantMemories.length > 0) {
+      coreMetrics.recordMemoryRead(context.relevantMemories.length);
+    }
+
     // 5. DeepSeek Brain Evaluation (Only suggests behavior; does NOT authorize)
+    coreMetrics.recordBrainConsultation();
     const brainResult = await this.deepSeekAdapter.evaluate(
       context,
       isDirectMention ? `User ${author} is directly addressing you: "${content}"` : undefined
     );
+
+    if (brainResult.decision.decision === 'respond') {
+      if (brainResult.aiUsed) {
+        coreMetrics.recordAiResponse(brainResult.tokensUsed);
+      } else {
+        coreMetrics.recordFallbackResponse();
+      }
+    } else {
+      coreMetrics.recordSilence();
+    }
 
     // 6. Post-Evaluation Core Guardrails: DeepSeek only suggests; the Core enforces
     const toolResults: ToolExecutionResult[] = [];
@@ -348,6 +455,7 @@ export class FoxtyCore {
       );
 
       for (const msg of allowedMessages) {
+        coreMetrics.recordToolExecution();
         const sendResult = await this.toolExecutor.execute(
           {
             tool: 'send_message',
@@ -372,6 +480,7 @@ export class FoxtyCore {
       );
 
       for (const emoji of allowedReactions) {
+        coreMetrics.recordToolExecution();
         const reactResult = await this.toolExecutor.execute(
           {
             tool: 'react',
@@ -404,6 +513,7 @@ export class FoxtyCore {
       }
 
       for (const req of approved) {
+        coreMetrics.recordToolExecution();
         const actionResult = await this.toolExecutor.execute(req, channel);
         toolResults.push(actionResult);
       }
@@ -424,6 +534,7 @@ export class FoxtyCore {
           // Core policy: never allow sensitive keywords to be marked safe_for_teasing
           const safeForTeasing = containsSensitive ? false : candidate.safeForTeasing;
 
+          coreMetrics.recordMemoryWrite();
           await this.memoryStore.save({
             content: candidate.content,
             type: candidate.type,

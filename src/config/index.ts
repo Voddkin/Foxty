@@ -64,6 +64,8 @@ export interface FoxtyConfig {
   deepSeekBaseUrl: string;
   deepSeekModel: string;
   deepSeek: DeepSeekBrainConfig;
+  memoryProvider?: 'sqlite' | 'firestore' | 'in-memory';
+  memoryStore?: any;
   testMode: boolean;
   port: number;
   maxBurstMessages: number;
@@ -103,6 +105,7 @@ export function loadConfig(): FoxtyConfig {
     deepSeekBaseUrl: baseUrl,
     deepSeekModel: model,
     deepSeek: deepSeekConfig,
+    memoryProvider: (process.env.MEMORY_PROVIDER as any) || 'sqlite',
     testMode: process.env.TEST_MODE !== 'false',
     port: parseInt(process.env.PORT || '3000', 10),
     maxBurstMessages: 3,

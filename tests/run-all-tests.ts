@@ -14,6 +14,8 @@ import { runChannelBehaviorPolicyTests } from './test_channel_behavior_policy.js
 import { runServerMapValidatorTests } from './test_server_map_validator.js';
 import { runDeepSeekBrainTestSuite } from './deepseek-brain.test.js';
 import { runDiscordIntegrationTestSuite } from './test_discord_integration.js';
+import { runPersistenceIntegrationTestSuite } from './test_persistence_integration.js';
+import { runDeepSeekCircuitBreakerTestSuite } from './test_deepseek_circuit_breaker.js';
 
 let passed = 0;
 let failed = 0;
@@ -284,6 +286,22 @@ async function runTestSuite() {
     failed += discordResults.failed;
   } else {
     passed += discordResults.passed;
+  }
+
+  // 19. Real Persistent Memory Integration (SQLite & Boundaries) Verification
+  const persistenceResults = await runPersistenceIntegrationTestSuite();
+  if (persistenceResults.failed > 0) {
+    failed += persistenceResults.failed;
+  } else {
+    passed += persistenceResults.passed;
+  }
+
+  // 20. DeepSeek Circuit Breaker & Fault Isolation Verification
+  const circuitBreakerResults = await runDeepSeekCircuitBreakerTestSuite();
+  if (circuitBreakerResults.failed > 0) {
+    failed += circuitBreakerResults.failed;
+  } else {
+    passed += circuitBreakerResults.passed;
   }
 
   console.log('\n=============================================');

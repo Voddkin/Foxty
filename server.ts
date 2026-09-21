@@ -1,19 +1,14 @@
 import express from 'express';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { loadConfig } from './src/config/index.js';
 import { FoxtyCore } from './src/core/FoxtyCore.js';
 import { DiscordAdapter } from './src/discord/DiscordAdapter.js';
 import { logger, sanitizeSensitiveData } from './src/core/Logger.js';
 
-// Setup ES module paths
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
   app.use(express.json());
 
@@ -26,6 +21,75 @@ async function startServer() {
   discordAdapter.initialize().catch((err) => {
     console.error('Failed to initialize Discord client:', err);
   });
+
+  // ==========================================
+  // Standardized Health Check Endpoints
+  // (Available at root /health and /api/health)
+  // ==========================================
+
+  // 1a. General Health Check
+  const handleGeneralHealth = async (req: express.Request, res: express.Response) => {
+    try {
+      const health = await core.getGeneralHealth();
+      const httpCode = health.status === 'unhealthy' ? 503 : (health.status === 'degraded' ? 200 : 200);
+      res.status(httpCode).json(health);
+    } catch (err: any) {
+      res.status(500).json({
+        status: 'unhealthy',
+        timestamp: new Date().toISOString(),
+        error: sanitizeSensitiveData(err.message),
+      });
+    }
+  };
+  app.get('/health', handleGeneralHealth);
+  app.get('/api/health', handleGeneralHealth);
+
+  // 1b. DeepSeek Specific Health Check
+  const handleDeepSeekHealth = async (req: express.Request, res: express.Response) => {
+    try {
+      const deepSeekStatus = await core.getDeepSeekHealth();
+      res.json(deepSeekStatus);
+    } catch (err: any) {
+      res.status(500).json({
+        configured: false,
+        status: 'error',
+        error: sanitizeSensitiveData(err.message),
+      });
+    }
+  };
+  app.get('/health/deepseek', handleDeepSeekHealth);
+  app.get('/api/health/deepseek', handleDeepSeekHealth);
+
+  // Live DeepSeek ping / connection verification
+  const handleDeepSeekTest = async (req: express.Request, res: express.Response) => {
+    try {
+      const result = await core.getDeepSeekAdapter().testDeepSeekConnection();
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: sanitizeSensitiveData(err.message),
+      });
+    }
+  };
+  app.post('/health/deepseek/test', handleDeepSeekTest);
+  app.post('/api/health/deepseek/test', handleDeepSeekTest);
+
+  // 1c. Memory Persistence Specific Health Check
+  const handleMemoryHealth = async (req: express.Request, res: express.Response) => {
+    try {
+      const memHealth = await core.getMemoryHealth();
+      res.json(memHealth);
+    } catch (err: any) {
+      res.status(500).json({
+        connected: false,
+        readWriteOk: false,
+        error: sanitizeSensitiveData(err.message),
+      });
+    }
+  };
+  app.get('/health/memory', handleMemoryHealth);
+  app.get('/api/health/memory', handleMemoryHealth);
 
   // ==========================================
   // API Routes (mounted BEFORE Vite middleware)
