@@ -179,14 +179,62 @@ export function normalizeBrainDecision(raw: RawBrainOutput): BrainDecision {
   };
 }
 
+export function extractAndCleanJsonString(rawText: string): string {
+  let cleaned = rawText.trim();
+
+  // 1. Strip reasoning / thinking tokens (e.g. <think>...</think>) from DeepSeek-R1 / Reasoner models
+  cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+  // 2. Extract content from markdown code block if present
+  const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (codeBlockMatch && codeBlockMatch[1]) {
+    cleaned = codeBlockMatch[1].trim();
+  } else {
+    // Try to find the outermost JSON object { ... }
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+    }
+  }
+
+  // 3. Remove single line comments and multi-line comments
+  cleaned = cleaned.replace(/\/\/.*$/gm, '');
+  cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // 4. Remove trailing commas before closing braces/brackets
+  cleaned = cleaned.replace(/,\s*([}\]])/g, '$1');
+
+  return cleaned.trim();
+}
+
 export function parseBrainOutput(rawText: string): { success: boolean; data?: BrainDecision; error?: string } {
   try {
-    let cleaned = rawText.trim();
-    if (cleaned.startsWith('```')) {
-      cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+    const cleaned = extractAndCleanJsonString(rawText);
+
+    if (!cleaned.startsWith('{') && !cleaned.startsWith('[')) {
+      return {
+        success: false,
+        error: `Malformed JSON string: No valid JSON structure found in brain output`,
+      };
     }
 
-    const json = JSON.parse(cleaned);
+    let json: any;
+    try {
+      json = JSON.parse(cleaned);
+    } catch (parseErr: any) {
+      // Secondary repair attempt: fix unescaped newlines or single quotes
+      try {
+        const secondary = cleaned.replace(/[\n\r]/g, ' ');
+        json = JSON.parse(secondary);
+      } catch {
+        return {
+          success: false,
+          error: `Malformed JSON string: ${parseErr.message}`,
+        };
+      }
+    }
+
     const parsed = BrainResponseSchema.safeParse(json);
 
     if (!parsed.success) {
