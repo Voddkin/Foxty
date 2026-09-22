@@ -23,12 +23,15 @@ export default function App() {
         fetch('/api/status'),
         fetch('/api/channels'),
       ]);
+      if (!resStatus.ok || !resChannels.ok) {
+        throw new Error('Server starting up...');
+      }
       const dataStatus = await resStatus.json();
       const dataChannels = await resChannels.json();
       setStatus(dataStatus);
       setChannels(Array.isArray(dataChannels) ? dataChannels : []);
     } catch (err) {
-      console.error('Failed fetching status/channels:', err);
+      console.warn('App: Foxty Core backend is offline or starting up, retrying shortly...', err);
     } finally {
       setLoading(false);
     }
@@ -36,6 +39,9 @@ export default function App() {
 
   useEffect(() => {
     fetchStatus();
+    // Poll status to auto-reconnect and refresh states
+    const interval = setInterval(fetchStatus, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   return (
@@ -67,7 +73,7 @@ export default function App() {
         {/* Personality State Vectors */}
         <PersonalityPanel state={status?.state} />
 
-        {/* Runtime Knowledge & Canonical Constitution (11 Documents Prefix Injection) */}
+        {/* Runtime Knowledge & Canonical Constitution (12 Documents Prefix Injection) */}
         <RuntimeKnowledgePanel onKnowledgeReloaded={fetchStatus} />
 
         {/* Server Map Canonical Topology Validator (New Diagnostic Module) */}

@@ -176,10 +176,14 @@ export class DiscordAdapter implements DiscordActionHandler {
             new RegExp(`\\b${botUsername}\\b`, 'i').test(message.content) ||
             /\bfoxty\b/i.test(message.content);
 
+          const channelInfo = this.core.getChannelById(message.channel.id);
+          const isFrequentChannel = channelInfo?.foxtyPolicy === 'Uso Frequente';
+
           const isMentioned =
             Boolean(botId && message.mentions.has(botId)) ||
             isDirectReplyToBot ||
-            hasTextMention;
+            hasTextMention ||
+            isFrequentChannel;
 
           if (isMentioned) {
             await this.core.handleMessage({

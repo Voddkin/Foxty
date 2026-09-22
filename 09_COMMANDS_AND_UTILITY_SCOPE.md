@@ -158,6 +158,7 @@ Toda nova função precisa responder:
 
 ```text
 isso realmente aumenta o Foxty?
+```
 
 Se não:
 

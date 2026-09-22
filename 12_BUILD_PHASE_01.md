@@ -106,6 +106,7 @@ temperature
 max_tokens
 response_format
 tools
+```
 
 O modelo inicial será:
 

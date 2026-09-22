@@ -1,6 +1,3 @@
-Agora o **mundo físico do Foxty**.
-
-```md
 # FOxty — Cherry Place Server Model
 
 Version: 0.1

@@ -22,17 +22,17 @@ function assert(condition: boolean, testName: string, message?: string) {
 
 export async function runRuntimeKnowledgeTestSuite(): Promise<{ passed: number; failed: number }> {
   console.log('\n========================================================');
-  console.log('📜 Test Suite: Runtime Knowledge / 11 Canonical Documents');
+  console.log('📜 Test Suite: Runtime Knowledge / 12 Canonical Documents');
   console.log('========================================================\n');
 
-  // Test 1: Instantiation and Complete Loading of 11 Documents
+  // Test 1: Instantiation and Complete Loading of 12 Documents
   console.log('Group 1: Discovery & Complete Loading of Canonical Files');
   const loader = new RuntimeKnowledgeLoader();
   const status = loader.getStatus();
 
-  assert(status.isComplete === true, 'All 11 canonical documents loaded completely');
-  assert(status.loadedCount === 11, 'Loaded count equals 11');
-  assert(status.totalExpected === 11, 'Total expected equals 11');
+  assert(status.isComplete === true, 'All 12 canonical documents loaded completely');
+  assert(status.loadedCount === 12, 'Loaded count equals 12');
+  assert(status.totalExpected === 12, 'Total expected equals 12');
   assert(status.missingDocuments.length === 0, 'No missing documents in repository root');
   assert(status.emptyDocuments.length === 0, 'No empty documents found in repository root');
   assert(status.totalSizeBytes > 40000, `Total bytes loaded (${status.totalSizeBytes}) > 40KB`);
@@ -146,7 +146,7 @@ export async function runRuntimeKnowledgeTestSuite(): Promise<{ passed: number; 
 
     assert(emptyStatus.isComplete === false, 'isComplete is false when canonical files are missing');
     assert(emptyStatus.loadedCount === 0, 'Loaded count is 0 in empty folder');
-    assert(emptyStatus.missingDocuments.length === 11, 'All 11 files detected as missing');
+    assert(emptyStatus.missingDocuments.length === 12, 'All 12 files detected as missing');
     assert(emptyLoader.getRenderedConstitutionPrompt().includes('[ERROR: Document'), 'Prompt marks missing documents with clear error block without crashing');
   } finally {
     fs.rmSync(emptyTempDir, { recursive: true, force: true });

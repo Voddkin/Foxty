@@ -95,8 +95,8 @@ export class ObservationPreFilter {
       relevance += 0.2;
     }
 
-    // Direct mention override
-    if (isDirectMention) {
+    // Direct mention or frequent channel override
+    if (isDirectMention || channel.foxtyPolicy === 'Uso Frequente') {
       relevance = 1.0;
     }
 

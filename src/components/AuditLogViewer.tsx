@@ -5,15 +5,21 @@ import { AuditLogEntry } from '../types.js';
 export const AuditLogViewer: React.FC = () => {
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
+  const [hasError, setHasError] = useState<boolean>(false);
 
   const fetchLogs = async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/logs?limit=40');
+      if (!res.ok) {
+        throw new Error(`Server responded with ${res.status}`);
+      }
       const data = await res.json();
       setLogs(Array.isArray(data) ? data : []);
+      setHasError(false);
     } catch (err) {
-      console.error('Failed fetching logs:', err);
+      setHasError(true);
+      console.warn('AuditLogViewer: Waiting for Foxty Core server initialization...', err);
     } finally {
       setLoading(false);
     }
@@ -49,7 +55,13 @@ export const AuditLogViewer: React.FC = () => {
       </div>
 
       <div className="space-y-1.5 max-h-64 overflow-y-auto font-mono text-[11px] pr-1">
-        {logs.length === 0 ? (
+        {hasError ? (
+          <div className="text-center py-6 text-zinc-500 flex flex-col items-center justify-center gap-2">
+            <span className="inline-block w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+            <p className="font-medium text-zinc-400">Aguardando inicialização do servidor Foxty...</p>
+            <p className="text-[10px] text-zinc-600">Reconectando automaticamente em alguns segundos.</p>
+          </div>
+        ) : logs.length === 0 ? (
           <p className="text-zinc-600 text-center py-4">Nenhum evento registrado ainda.</p>
         ) : (
           logs.map((log) => {

@@ -563,7 +563,7 @@ export interface DiscordConnectionAudit {
 }
 
 // ----------------------------------------------------------------------------
-// RUNTIME KNOWLEDGE & CONSTITUTION TYPES (11 CANONICAL DOCUMENTS)
+// RUNTIME KNOWLEDGE & CONSTITUTION TYPES (12 CANONICAL DOCUMENTS)
 // ----------------------------------------------------------------------------
 export type CanonicalDocumentCategory =
   | 'BEHAVIOR_AND_IDENTITY'

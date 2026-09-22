@@ -142,7 +142,7 @@ export const RuntimeKnowledgePanel: React.FC<RuntimeKnowledgePanelProps> = ({
               </span>
             </div>
             <p className="text-xs text-zinc-400">
-              11 Documentos Canônicos injetados deterministicamente como prefixo no DeepSeek Brain.
+              {knowledge ? `${knowledge.totalExpected}` : '12'} Documentos Canônicos injetados deterministicamente como prefixo no DeepSeek Brain.
             </p>
           </div>
         </div>
@@ -151,7 +151,7 @@ export const RuntimeKnowledgePanel: React.FC<RuntimeKnowledgePanelProps> = ({
           <button
             onClick={handleOpenPromptPrefix}
             className="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-xs text-zinc-300 font-mono flex items-center gap-1.5 transition-colors cursor-pointer"
-            title="Ver o prompt do sistema gerado com os 11 documentos"
+            title={`Ver o prompt do sistema gerado com os ${knowledge?.totalExpected || 12} documentos`}
           >
             <Code className="w-3.5 h-3.5 text-purple-400" />
             <span>Ver Prefixo Injetado</span>
@@ -177,7 +177,7 @@ export const RuntimeKnowledgePanel: React.FC<RuntimeKnowledgePanelProps> = ({
             <span>Status Constituição</span>
           </div>
           <div className="text-sm font-semibold text-zinc-100 mt-1">
-            {knowledge?.isComplete ? '100% Completa (11/11)' : 'Degradada'}
+            {knowledge?.isComplete ? `100% Completa (${knowledge.loadedCount}/${knowledge.totalExpected})` : 'Degradada'}
           </div>
           <div className="text-[10px] text-zinc-500 font-mono mt-0.5">
             Cat. A ({behaviorCount}) • Cat. B ({archCount})

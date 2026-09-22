@@ -1,6 +1,3 @@
-Aqui está o documento para o comportamento **“ele realmente pode fazer coisas”**.
-
-```md
 # FOxty — Discord Autonomy & Action System
 
 Version: 0.1

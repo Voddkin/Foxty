@@ -1,6 +1,3 @@
-Esse aqui eu considero **obrigatório** justamente pelo que você falou.
-
-```md
 # FOxty — Observation, Privacy & Memory Boundary
 
 Version: 0.1

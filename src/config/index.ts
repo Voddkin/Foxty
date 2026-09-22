@@ -79,7 +79,7 @@ export function loadConfig(): FoxtyConfig {
   const baseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
   const model = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
   const temperature = parseFloat(process.env.DEEPSEEK_TEMPERATURE || '0.7');
-  const maxTokens = parseInt(process.env.DEEPSEEK_MAX_TOKENS || '600', 10);
+  const maxTokens = parseInt(process.env.DEEPSEEK_MAX_TOKENS || '2048', 10);
   const timeoutMs = parseInt(process.env.DEEPSEEK_TIMEOUT_MS || '15000', 10);
   const thinkingMode = (process.env.DEEPSEEK_THINKING_MODE as any) || 'none';
   const reasoningEffort = (process.env.DEEPSEEK_REASONING_EFFORT as any) || undefined;

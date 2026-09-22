@@ -133,23 +133,23 @@ export async function runPhase5AuditSuite(): Promise<{
   }
 
   // ----------------------------------------------------
-  // 2. AUDIT: RUNTIME CONSTITUTION (11 DOCUMENTS)
+  // 2. AUDIT: RUNTIME CONSTITUTION (12 DOCUMENTS)
   // ----------------------------------------------------
   console.log('\n--- 2. RUNTIME CONSTITUTION AUDIT ---');
   try {
     const loader = new RuntimeKnowledgeLoader();
     const status = loader.getStatus();
     const docCount = status.loadedCount;
-    const all11Loaded = docCount === 11;
+    const all12Loaded = docCount === 12;
     const promptLength = status.promptPrefixSize;
     const totalSizeBytes = status.totalSizeBytes;
     const hash = status.constitutionHash ? status.constitutionHash.slice(0, 12) : 'N/A';
 
     record(
       'RUNTIME_CONSTITUTION',
-      'All 11 canonical constitution documents loaded without missing files',
-      all11Loaded,
-      `Loaded: ${docCount}/11 docs, Hash: ${hash}..., TotalBytes: ${totalSizeBytes}, SystemPromptChars: ${promptLength}`
+      'All 12 canonical constitution documents loaded without missing files',
+      all12Loaded,
+      `Loaded: ${docCount}/12 docs, Hash: ${hash}..., TotalBytes: ${totalSizeBytes}, SystemPromptChars: ${promptLength}`
     );
   } catch (err: any) {
     record('RUNTIME_CONSTITUTION', 'Constitution loading audit', false, err.message);

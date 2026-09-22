@@ -93,6 +93,13 @@ export const CANONICAL_DOCUMENTS_METADATA: readonly CanonicalDocumentMetadata[] 
     category: 'BEHAVIOR_AND_IDENTITY',
     description: 'Contrato de interpretação e sugestão de ações em JSON puro sem autoridade executiva direta.',
   },
+  {
+    id: '12',
+    filename: '12_BUILD_PHASE_01.md',
+    title: 'Foxty Build Phase 01 & Skeleton Guidelines',
+    category: 'ARCHITECTURE_AND_INFRASTRUCTURE',
+    description: 'Diretrizes de desenvolvimento da Fase 1, esqueleto técnico, escopo do SakuraMail e segurança de secrets.',
+  },
 ] as const;
 
 export interface LoadedDocumentEntry {
@@ -149,7 +156,7 @@ export class RuntimeKnowledgeLoader {
   }
 
   /**
-   * Reads and caches all 11 canonical documents from disk.
+   * Reads and caches all 12 canonical documents from disk.
    */
   public loadAllDocuments(): RuntimeKnowledgeStatus {
     this.documentsMap.clear();
@@ -271,7 +278,7 @@ export class RuntimeKnowledgeLoader {
     const archSection = archDocs.map(formatDocBlock).join('\n\n');
 
     return `================================================================================
-📜 FOXTY RUNTIME KNOWLEDGE & CONSTITUTIONAL KNOWLEDGE BASE (11 CANONICAL DOCUMENTS)
+📜 FOXTY RUNTIME KNOWLEDGE & CONSTITUTIONAL KNOWLEDGE BASE (12 CANONICAL DOCUMENTS)
 Constitution Hash: ${this.constitutionHash}
 Loaded Documents: ${loadedCount}/${total}
 Source: Canonical Repository Master
@@ -304,7 +311,7 @@ SECTION III: RUNTIME INSTRUCTIONS & COGNITIVE OPERATING DIRECTIVES
 1. VOCÊ É O CÉREBRO LINGUÍSTICO E COMPORTAMENTAL DE FOXTY:
    Você é a inteligência que interpreta o ambiente, as pessoas, as conversas e as situações do Cherry Place.
 2. OS DOCUMENTOS SÃO A CONSTITUIÇÃO VIVA DO PERSONAGEM:
-   Os 11 documentos canônicos fornecidos acima são a verdade documental e comportamental de Foxty.
+   Os 12 documentos canônicos fornecidos acima são a verdade documental e comportamental de Foxty.
    Você deve utilizá-los ativamente para interpretar situações, reconhecer hábitos de Kris (OnlyKrisVK)
    e Riely (Kazelyx), escolher o tom exato e manter a coerência do personagem.
 3. NÃO TRATE OS DOCUMENTOS COMO TEXTO DECORATIVO:
@@ -337,7 +344,7 @@ SECTION III: RUNTIME INSTRUCTIONS & COGNITIVE OPERATING DIRECTIVES
   }
 
   /**
-   * Returns a diagnostic status object with complete metadata of all 11 documents.
+   * Returns a diagnostic status object with complete metadata of all 12 documents.
    */
   public getStatus(): RuntimeKnowledgeStatus {
     const docsList: CanonicalDocumentInfo[] = [];
@@ -405,7 +412,7 @@ SECTION III: RUNTIME INSTRUCTIONS & COGNITIVE OPERATING DIRECTIVES
     const lines = [
       `# 📜 Foxty Runtime Knowledge & Constitution Status`,
       ``,
-      `- **Status**: ${status.isComplete ? '✅ ALL 11 CANONICAL DOCUMENTS LOADED' : '⚠️ INCOMPLETE / DEGRADED'}`,
+      `- **Status**: ${status.isComplete ? '✅ ALL 12 CANONICAL DOCUMENTS LOADED' : '⚠️ INCOMPLETE / DEGRADED'}`,
       `- **Documents Loaded**: ${status.loadedCount}/${status.totalExpected}`,
       `- **Constitution Hash**: \`${status.constitutionHash}\``,
       `- **Last Loaded**: ${status.loadedAt}`,

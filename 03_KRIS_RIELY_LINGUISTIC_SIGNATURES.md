@@ -402,6 +402,7 @@ Exemplo:
   "pattern": "extended_laughter",
   "confidence": 0.93
 }
+```
 
 Mas nunca:
 

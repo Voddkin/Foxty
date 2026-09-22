@@ -510,15 +510,28 @@ export class FoxtyCore {
         channel
       );
 
+      let isFirstMessage = true;
       for (const msg of allowedMessages) {
         coreMetrics.recordToolExecution();
-        const sendResult = await this.toolExecutor.execute(
-          {
-            tool: 'send_message',
-            arguments: { channel_id: channel.id, content: msg },
-          },
-          channel
-        );
+        let sendResult;
+        if (isFirstMessage && params.messageId) {
+          sendResult = await this.toolExecutor.execute(
+            {
+              tool: 'reply_to_message',
+              arguments: { channel_id: channel.id, message_id: params.messageId, content: msg },
+            },
+            channel
+          );
+          isFirstMessage = false;
+        } else {
+          sendResult = await this.toolExecutor.execute(
+            {
+              tool: 'send_message',
+              arguments: { channel_id: channel.id, content: msg },
+            },
+            channel
+          );
+        }
         toolResults.push(sendResult);
       }
 
@@ -591,7 +604,7 @@ export class FoxtyCore {
       !isSakuraMailChannel(channel.id)
     ) {
       for (const candidate of brainResult.decision.memoryCandidates) {
-        if (candidate.confidence >= 0.85 && candidate.content && candidate.content.trim().length >= 3) {
+        if (candidate.confidence >= 0.70 && candidate.content && candidate.content.trim().length >= 3) {
           const lower = candidate.content.toLowerCase();
           const sensitiveKeywords = ['senha', 'password', 'token', 'secret', 'credencial', 'intimate', 'sexual', 'privad'];
           const containsSensitive = sensitiveKeywords.some((kw) => lower.includes(kw));
